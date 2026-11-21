@@ -27,7 +27,7 @@ home locked, the cog shows Amazon's panel as before.
 | Network | | glance: Filter on/off + Wi-Fi signal/band; OK restarts DNS filter |
 | TV health | | only with an expected state ([expected.example.conf](expected.example.conf)): All as set, or the first problem; OK cycles through them |
 | Auto-switch | on / paused until 06:00 / off | only from home, and only where home opens an input when idle (`idle_input`): pauses that switch |
-| Warmth | cold to warm in 10 % steps | switches between always on and **after sunset only** |
+| Warmth | cold to warm in 10 % steps | switches between always on, **after sunset only**, and **off till next sunset** |
 | Sleep timer | 15-minute steps, up to 4 hours | |
 | Noise level | | live ambient dB bar while panel is open; only with `install.sh --mic` and a built-in mic (AFTHY7ABBA: its built-in mic route reads only zeros, so the row stays off there) |
 

@@ -1013,12 +1013,17 @@ public final class Panel {
     private void showWarmth() {
         SharedPreferences p = Tint.prefs(context);
         int level = p.getInt(Tint.WARMTH, 0);
-        boolean auto = p.getBoolean(Tint.AUTO, false);
+        long now = System.currentTimeMillis();
+        int mode = Warmth.getMode(p, now);
+
         warmth.value.setText(level == 0 ? context.getString(R.string.off) : context.getString(R.string.percent, level * 100 / Tint.STEPS));
         warmth.bar.setValue(level / (float) Tint.STEPS);
         String sub;
-        if (auto) {
-            long now = System.currentTimeMillis();
+        if (mode == Warmth.MODE_PAUSED) {
+            long pauseUntil = p.getLong(Tint.WARMTH_PAUSE, 0L);
+            sub = pauseUntil > 0 ? context.getString(R.string.warmth_paused_until, hm(pauseUntil))
+                                 : context.getString(R.string.warmth_paused);
+        } else if (mode == Warmth.MODE_AFTER_SUNSET) {
             TimeZone tz = TimeZone.getDefault();
             double[] at = Sun.place(tz);
             double[] today = Sun.times(now, tz, at[0], at[1]);
@@ -1043,7 +1048,7 @@ public final class Panel {
     }
 
     private void toggleWarmthAuto() {
-        Warmth.toggleAuto(context);
+        Warmth.cycleMode(context);
         showWarmth();
     }
 
