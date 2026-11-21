@@ -40,7 +40,7 @@ import java.util.TimeZone;
 public final class Tint extends Service {
     static final String TAG = "dumbtv-quick";
     static final String PREFS = "quick";
-    static final String WARMTH = "warmth", AUTO = "auto";
+    static final String WARMTH = "warmth", AUTO = "auto", WARMTH_PAUSE = "warmth_pause";
     static final String ACTION_SETTINGS_KEY = "tv.dumbtv.home.KEY_SETTINGS";
     static final String ACTION_SHOW = "tv.dumbtv.quick.SHOW";
     static final String ACTION_CLOSE = "tv.dumbtv.quick.CLOSE";

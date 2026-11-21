@@ -47,10 +47,12 @@
 
     <string name="warmth">Warmth</string>
     <string name="warmth_hint">OK: warm after sunset</string>
-    <string name="warmth_always">Always on · OK: after sunset only</string>
+    <string name="warmth_always">Always on · OK: after sunset</string>
     <string name="warmth_auto">After sunset</string>
     <string name="warmth_auto_from">After sunset · from %1$s</string>
     <string name="warmth_auto_until">After sunset · on until %1$s</string>
+    <string name="warmth_paused">Off till next sunset</string>
+    <string name="warmth_paused_until">Off till next sunset · %1$s</string>
 
     <string name="sleep">Sleep timer</string>
     <string name="sleep_hint">Left and right: 15 minutes</string>

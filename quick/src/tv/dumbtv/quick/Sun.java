@@ -87,6 +87,26 @@ final class Sun {
         return new double[] {nearNoon(utcMidnight, rise, localNoon), nearNoon(utcMidnight, set, localNoon)};
     }
 
+    /**
+     * Epoch milliseconds of the next sunset after {@code now}.
+     * If sunset cannot be calculated (e.g. polar night/day), returns {@code now + 86400000L}.
+     */
+    static long nextSunset(long now, TimeZone tz, double lat, double lon) {
+        double[] today = times(now, tz, lat, lon);
+        if (!Double.isNaN(today[1]) && now < (long) today[1]) {
+            return (long) today[1];
+        }
+        Calendar c = Calendar.getInstance(tz);
+        c.setTimeInMillis(now);
+        c.add(Calendar.DAY_OF_YEAR, 1);
+        c.set(Calendar.HOUR_OF_DAY, 12);
+        double[] tomorrow = times(c.getTimeInMillis(), tz, lat, lon);
+        if (!Double.isNaN(tomorrow[1])) {
+            return (long) tomorrow[1];
+        }
+        return now + 86400000L;
+    }
+
     /** The instant of {@code hour} UTC on that date, moved by a day if that lands it nearer local noon. */
     private static double nearNoon(long utcMidnight, double hour, long localNoon) {
         if (Double.isNaN(hour)) return hour;

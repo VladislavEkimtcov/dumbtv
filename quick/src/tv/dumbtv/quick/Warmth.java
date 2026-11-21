@@ -32,9 +32,25 @@ public final class Warmth {
     private static final String TAG = "dumbtv-warmth";
     public static final int STEPS = 10;
 
+    public static final int MODE_ALWAYS_ON = 0;
+    public static final int MODE_AFTER_SUNSET = 1;
+    public static final int MODE_PAUSED = 2; // "Off till next sunset"
+
     private static volatile int lastApplied = -1;
 
     private Warmth() {}
+
+    /** Resolves the active mode based on preferences and current timestamp. */
+    public static int getMode(SharedPreferences p, long now) {
+        if (!p.getBoolean(Tint.AUTO, false)) {
+            return MODE_ALWAYS_ON;
+        }
+        long pauseUntil = p.getLong(Tint.WARMTH_PAUSE, 0L);
+        if (pauseUntil > now) {
+            return MODE_PAUSED;
+        }
+        return MODE_AFTER_SUNSET;
+    }
 
     /** Applies the current target warmth to TV hardware. */
     public static void tick(Context c) {
@@ -54,16 +70,38 @@ public final class Warmth {
         applyImmediate(c);
     }
 
-    /** Toggles auto mode on or off. */
-    public static void toggleAuto(Context c) {
+    /** Cycles through modes: Always on -> After sunset -> Off till next sunset -> Always on. */
+    public static void cycleMode(Context c) {
         SharedPreferences p = Tint.prefs(c);
-        boolean auto = !p.getBoolean(Tint.AUTO, false);
-        SharedPreferences.Editor e = p.edit().putBoolean(Tint.AUTO, auto);
-        if (auto && p.getInt(Tint.WARMTH, 0) == 0) {
-            e.putInt(Tint.WARMTH, STEPS / 2);
+        long now = System.currentTimeMillis();
+        int current = getMode(p, now);
+        SharedPreferences.Editor e = p.edit();
+        if (current == MODE_ALWAYS_ON) {
+            e.putBoolean(Tint.AUTO, true);
+            e.remove(Tint.WARMTH_PAUSE);
+            if (p.getInt(Tint.WARMTH, 0) == 0) {
+                e.putInt(Tint.WARMTH, STEPS / 2);
+            }
+        } else if (current == MODE_AFTER_SUNSET) {
+            TimeZone tz = TimeZone.getDefault();
+            double[] at = Sun.place(tz);
+            long nextSunset = Sun.nextSunset(now, tz, at[0], at[1]);
+            e.putBoolean(Tint.AUTO, true);
+            e.putLong(Tint.WARMTH_PAUSE, nextSunset);
+        } else {
+            e.putBoolean(Tint.AUTO, false);
+            e.remove(Tint.WARMTH_PAUSE);
+            if (p.getInt(Tint.WARMTH, 0) == 0) {
+                e.putInt(Tint.WARMTH, STEPS / 2);
+            }
         }
         e.apply();
         apply(c, false);
+    }
+
+    /** Toggles auto mode / cycles through the three modes. */
+    public static void toggleAuto(Context c) {
+        cycleMode(c);
     }
 
     /** Re-evaluates and applies warmth (immediate if specified, otherwise steps). */
@@ -102,10 +140,12 @@ public final class Warmth {
     public static int targetLevel(Context c) {
         SharedPreferences p = Tint.prefs(c);
         int saved = p.getInt(Tint.WARMTH, STEPS / 2);
-        boolean auto = p.getBoolean(Tint.AUTO, false);
-        if (!auto) return saved;
-
         long now = System.currentTimeMillis();
+        int mode = getMode(p, now);
+        if (mode == MODE_ALWAYS_ON) return saved;
+        if (mode == MODE_PAUSED) return 0;
+
+        // MODE_AFTER_SUNSET
         TimeZone tz = TimeZone.getDefault();
         double[] at = Sun.place(tz);
         float n = Sun.night(now, tz, at[0], at[1]);
@@ -116,13 +156,25 @@ public final class Warmth {
      * Determines how soon the next tick should run:
      * - Every 1.5s while actively in the 30-second sunset/sunrise ramp.
      * - At the exact moment sunset or sunrise ramp begins if within 60s.
+     * - At the expiration of a pause if within 60s.
      * - Every 60s at resting state.
      */
     public static long nextTickDelay(Context c) {
         SharedPreferences p = Tint.prefs(c);
-        if (!p.getBoolean(Tint.AUTO, false)) return 60000L;
-
         long now = System.currentTimeMillis();
+        int mode = getMode(p, now);
+        if (mode == MODE_ALWAYS_ON) return 60000L;
+
+        if (mode == MODE_PAUSED) {
+            long pauseUntil = p.getLong(Tint.WARMTH_PAUSE, 0L);
+            long left = pauseUntil - now;
+            if (left > 0 && left < 60000L) {
+                return Math.max(1000L, left);
+            }
+            return 60000L;
+        }
+
+        // MODE_AFTER_SUNSET
         TimeZone tz = TimeZone.getDefault();
         double[] at = Sun.place(tz);
         float n = Sun.night(now, tz, at[0], at[1]);

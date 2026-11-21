@@ -65,6 +65,15 @@ public final class SunTest {
         check(Sun.blend(200, 100, -0.2f) == 200, "clamp lower bound");
         check(Sun.blend(200, 100, 1.5f) == 100, "clamp upper bound");
 
+        // Next sunset calculation: during day -> today's sunset; at night -> tomorrow's sunset
+        long dayTime = at(tz, 2026, 11, 19, 13, 0);
+        long nextFromDay = Sun.nextSunset(dayTime, tz, 41.9, -87.6);
+        near(nextFromDay, at(tz, 2026, 11, 19, 16, 24), "next sunset from daytime is today");
+
+        long nightTime = at(tz, 2026, 11, 19, 22, 0);
+        long nextFromNight = Sun.nextSunset(nightTime, tz, 41.9, -87.6);
+        near(nextFromNight, at(tz, 2026, 11, 20, 16, 24), "next sunset from night is tomorrow");
+
         System.out.println("SunTest ok");
     }
 }
