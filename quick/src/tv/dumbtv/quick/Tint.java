@@ -44,8 +44,20 @@ public final class Tint extends Service {
     static final String ACTION_SETTINGS_KEY = "tv.dumbtv.home.KEY_SETTINGS";
     static final String ACTION_SHOW = "tv.dumbtv.quick.SHOW";
     static final String ACTION_CLOSE = "tv.dumbtv.quick.CLOSE";
-    static final String ACTION_IGNORE_BACK = "tv.dumbtv.quick.IGNORE_BACK";
-    static final String ACTION_BRING_TO_TOP = "tv.dumbtv.quick.BRING_TO_TOP";
+    /** From dumbtv home when Options › Quick settings panel or Child lock changes. */
+    static final String ACTION_SYNC = "tv.dumbtv.quick.SYNC";
+    /** From dumbtv home's Guard: a window of Amazon's quick settings came to the front. */
+    static final String ACTION_AMAZON_WINDOW = "tv.dumbtv.quick.AMAZON_WINDOW";
+    /** To dumbtv home's Guard: press BACK, the last way to close Amazon's overlay. */
+    static final String ACTION_AMAZON_BACK = "tv.dumbtv.home.AMAZON_QS_BACK";
+    /** A press of the cog or of HOME accounts for Amazon's overlay starting this long after it. */
+    private static final long ATTRIBUTE_MS = 2500;
+    /** Amazon's overlay draws its window this long or more after its service starts. */
+    private static final long AMAZON_DRAW_MS = 700;
+    /** After the panel's window is gone, for focus to reach Amazon's overlay before the BACK. */
+    private static final long BACK_AFTER_MS = 150;
+    /** The lock stays off this long after a long press of HOME, for Amazon to take the press. */
+    private static final long RELOCK_MS = 1500;
     /** Warmth steps, 0 (off) to {@link #STEPS}. */
     static final int STEPS = Warmth.STEPS;
 
@@ -64,21 +76,35 @@ public final class Tint extends Service {
     private Process logcat;
     private Thread reader;
     private BluetoothA2dp a2dp;
-    private long lastSettingsKeyAt;
+    private long lastSettingsKeyAt = -ATTRIBUTE_MS;
+    /** The last cog press that went to the panel (opened or closed it). */
+    private long cogAt = -ATTRIBUTE_MS;
+    /** The last time Amazon's overlay was wanted: a long press of HOME, or the panel switched off. */
+    private volatile long wantAmazonAt = -ATTRIBUTE_MS;
+    private long longHomeAt = -ATTRIBUTE_MS;
+    /** The last cog press that closed the panel: that press reaches Amazon's overlay too. */
+    private long cogClosedAt = -ATTRIBUTE_MS;
+    /** Amazon's overlay is up because of a cog press, not because it was asked for. */
+    private boolean amazonUnder;
+    private final Runnable amazonCheck = this::amazonStillUp;
+    /** dumbtv home's last answer: the panel replaces Amazon's here. */
+    private volatile boolean panelOn;
 
     private final BroadcastReceiver quickReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context c, Intent intent) {
             if (intent == null) return;
             String act = intent.getAction();
-            if (ACTION_IGNORE_BACK.equals(act)) {
-                if (panel != null) panel.ignoreNextBack();
-            } else if (ACTION_CLOSE.equals(act)) {
+            if (ACTION_CLOSE.equals(act)) {
                 if (panel != null && panel.isShowing()) panel.close();
-            } else if (ACTION_BRING_TO_TOP.equals(act)) {
-                if (panel != null && panel.isShowing()) panel.bringToTop();
             } else if (ACTION_SHOW.equals(act) || "tv.dumbtv.quick.PANEL".equals(act)) {
-                if (panel != null) panel.show(intent);
+                show(intent);
+            } else if (ACTION_SYNC.equals(act)) {
+                syncLock();
+            } else if (ACTION_AMAZON_WINDOW.equals(act)) {
+                onAmazonWindow();
+            } else if (AmazonQs.VISIBILITY.equals(act)) {
+                onAmazonVisibility(intent.getStringExtra("Visibility"));
             }
         }
     };
@@ -129,7 +155,7 @@ public final class Tint extends Service {
     static void showFromIntent(Context c, Intent intent) {
         Tint t = running;
         if (t != null && t.panel != null) {
-            t.ui.post(() -> t.panel.show(intent));
+            t.ui.post(() -> t.show(intent));
         } else {
             Intent s = new Intent(c, Tint.class);
             if (intent != null) s.putExtras(intent);
@@ -234,12 +260,16 @@ public final class Tint extends Service {
         panel = new Panel(this, ui, video);
 
         IntentFilter filter = new IntentFilter();
-        filter.addAction(ACTION_IGNORE_BACK);
         filter.addAction(ACTION_CLOSE);
         filter.addAction(ACTION_SHOW);
-        filter.addAction(ACTION_BRING_TO_TOP);
+        filter.addAction(ACTION_SYNC);
+        filter.addAction(ACTION_AMAZON_WINDOW);
         filter.addAction("tv.dumbtv.quick.PANEL");
-        registerReceiver(quickReceiver, filter);
+        registerReceiver(quickReceiver, filter, null, ui);
+        // Amazon's overlay service announces its start and stop to the store demo, with no
+        // permission; a registered receiver gets it (a manifest one would not, being implicit).
+        registerReceiver(quickReceiver, new IntentFilter(AmazonQs.VISIBILITY), null, ui);
+        syncLock();
 
         PqBridge.setConnectionListener(() -> ui.post(() -> Warmth.applyImmediate(Tint.this)));
         PqBridge.bind(this);
@@ -254,13 +284,9 @@ public final class Tint extends Service {
         if (intent != null) {
             String act = intent.getAction();
             if ("tv.dumbtv.quick.PANEL".equals(act) || ACTION_SHOW.equals(act)) {
-                if (panel != null) panel.show(intent);
+                show(intent);
             } else if (ACTION_CLOSE.equals(act)) {
                 if (panel != null && panel.isShowing()) panel.close();
-            } else if (ACTION_IGNORE_BACK.equals(act)) {
-                if (panel != null) panel.ignoreNextBack();
-            } else if (ACTION_BRING_TO_TOP.equals(act)) {
-                if (panel != null && panel.isShowing()) panel.bringToTop();
             }
         }
         return START_STICKY;
@@ -275,8 +301,9 @@ public final class Tint extends Service {
         if (panel != null && panel.isShowing()) {
             panel.close();
         }
-        sendBroadcast(new Intent("tv.dumbtv.home.PANEL_CLOSED").setPackage("tv.dumbtv.home"));
         panel = null;
+        // Without this service nothing opens the panel, so the cog goes back to Amazon's.
+        AmazonQs.lock(this, false);
         Warmth.restore(this);
         if (pictureOffView != null) {
             try {
@@ -313,7 +340,7 @@ public final class Tint extends Service {
         try {
             logcat = new ProcessBuilder("logcat", "-b", "default", "-b", "events", "-v", "brief", "-T", "1",
                     "DispService:I", "FireTVKeyPolicyManager:I", "am_proc_start:I", "am_proc_died:I",
-                    "QSUI-OverlaySettingsService:I", "QSUI-OverlayMenuAdapter:I", "*:S")
+                    "WindowManager:W", "ContextImpl:W", "*:S")
                     .redirectErrorStream(true).start();
         } catch (IOException e) {
             Log.w(TAG, "logcat did not start", e);
@@ -332,16 +359,14 @@ public final class Tint extends Service {
                             wasHdmi = nowHdmi;
                             ui.post(() -> backlight.source(nowHdmi));
                         }
-                    } else if (line.contains("FireTVKeyPolicyManager") && line.contains("keycode 176")) {
-                        handleSettingsKey();
-                    } else if (line.contains("am_proc_start") && line.contains("com.amazon.tv.quicksettings.ui")) {
-                        if (panel != null && panel.isShowing()) {
-                            ui.post(panel::bringToTop);
-                        }
-                    } else if (line.contains("QSUI-OverlaySettingsService") || line.contains("QSUI-OverlayMenuAdapter")) {
-                        if (panel != null && panel.isShowing()) {
-                            ui.post(panel::bringToTop);
-                        }
+                    } else if (LogLines.settingsKey(line)) {
+                        ui.post(this::onSettingsKey);
+                    } else if (LogLines.longHome(line)) {
+                        // Here, not on the main thread: Amazon reads its lock moments after this
+                        // line, and the main thread may be busy drawing the panel.
+                        onLongHome();
+                    } else if (LogLines.longHomeTag(line)) {
+                        continue;
                     } else {
                         airplayState = AirPlay.next(airplayState, line);
                     }
@@ -354,52 +379,185 @@ public final class Tint extends Service {
         reader.start();
     }
 
-    private void handleSettingsKey() {
-        long now = SystemClock.uptimeMillis();
+    private void show(Intent intent) {
+        if (panel != null) panel.show(intent);
+    }
+
+    private void show(int accent, String from, String idlePause, int idleMin) {
+        if (panel != null) panel.show(accent, from, idlePause, idleMin);
+    }
+
+    /**
+     * The remote's settings button. With Amazon's lock on (the panel enabled) Amazon ignores the
+     * press and this is all that happens; with it off, Amazon's overlay starts too, and
+     * {@link #onAmazonVisibility} keeps the panel above it and has it closed after the panel.
+     */
+    private void onSettingsKey() {
+        final long now = SystemClock.uptimeMillis();
         if (now - lastSettingsKeyAt < 350) return;
         lastSettingsKeyAt = now;
 
         if (panel != null && panel.isShowing()) {
-            suppressAmazonQuickSettings();
-            ui.post(panel::close);
-            sendBroadcast(new Intent(ACTION_SETTINGS_KEY).setPackage("tv.dumbtv.home").putExtra("close", true));
+            cogAt = now;
+            cogClosedAt = now;
+            panel.close();
             return;
         }
 
+        askHome(false, (ok, res) -> {
+            if (ok) {
+                cogAt = now;
+                panelOn = true;
+                applyLock();
+                int accent = res != null ? res.getInt("accent", 0xFF3D8BFF) : 0xFF3D8BFF;
+                String from = res != null ? res.getString("from") : null;
+                String idlePause = res != null ? res.getString("idle_pause") : null;
+                int idleMin = res != null ? res.getInt("idle_minutes", 0) : 0;
+                show(accent, from, idlePause, idleMin);
+                // Amazon's overlay can have started before the answer came.
+                if (AmazonQs.up() && AmazonQs.changedAt() >= now) amazonUnder();
+            } else if (!isHomeInstalled(this)) {
+                cogAt = now;
+                panelOn = true;
+                applyLock();
+                show(null);
+            } else {
+                // Switched off, child lock, or Guard not running: Amazon's panel, as without us.
+                // The log line is the key going down and Amazon acts on it coming up, so this
+                // press usually reaches Amazon already; nothing outside Amazon can open its
+                // overlay on Fire OS 8, so if it came up too soon, the next press does.
+                panelOn = false;
+                wantAmazonAt = now;
+                applyLock();
+            }
+        });
+    }
+
+    /**
+     * A long press of HOME opens Amazon's overlay, and that one is left alone. Its receiver is the
+     * one the lock turns away, so the lock comes off the moment the press shows in the log, and
+     * back on once Amazon has had the press. Amazon reads the lock twice for one long press: with
+     * the lock on, its first receiver passes the press on to a second one, which hands it back. So
+     * there is time, though no promise. Runs on the log reader's thread.
+     */
+    private void onLongHome() {
+        long now = SystemClock.uptimeMillis();
+        if (now - longHomeAt < 1000) return;
+        longHomeAt = now;
+        wantAmazonAt = now;
+        unlockedUntil = now + RELOCK_MS;
+        AmazonQs.lock(this, false);
+        ui.post(() -> {
+            if (panel != null && panel.isShowing()) panel.close();
+            ui.removeCallbacks(relock);
+            ui.postDelayed(relock, RELOCK_MS + 20);
+        });
+    }
+
+    private final Runnable relock = this::applyLock;
+    /** A long press of HOME keeps the lock off until then, for Amazon to take the press. */
+    private volatile long unlockedUntil;
+
+    /** Whether Amazon's overlay, just started, is one the panel replaces rather than one asked for. */
+    private boolean amazonUnwanted() {
+        long now = SystemClock.uptimeMillis();
+        if (now - wantAmazonAt < ATTRIBUTE_MS) return false;
+        return (panel != null && panel.isShowing()) || now - cogAt < ATTRIBUTE_MS;
+    }
+
+    private void onAmazonVisibility(String visibility) {
+        AmazonQs.visibility(visibility);
+        applyLock();
+        if (!AmazonQs.up()) {
+            amazonUnder = false;
+            ui.removeCallbacks(amazonCheck);
+            return;
+        }
+        if (amazonUnwanted()) amazonUnder();
+    }
+
+    /**
+     * Amazon's overlay started for a cog press although the lock should have stopped it (an
+     * update, or the first press after the lock was off). Its window comes later and lands above
+     * the panel's; Guard's window event, or failing that this check, puts the panel back on top.
+     */
+    private void amazonUnder() {
+        Log.i(TAG, "Amazon quick settings started for the cog" + (AmazonQs.locked(this) ? " despite its lock" : ""));
+        amazonUnder = true;
+        ui.removeCallbacks(amazonCheck);
+        ui.postDelayed(amazonCheck, AMAZON_DRAW_MS);
+    }
+
+    /** Once Amazon's window has drawn: the panel goes above it, or, with no panel, it goes. */
+    private void amazonStillUp() {
+        if (!amazonUnder || !AmazonQs.up()) return;
+        if (panel != null && panel.isShowing()) panel.bringToTop();
+        else backToAmazon();
+    }
+
+    /** Guard saw a window of Amazon's quick settings come to the front. */
+    private void onAmazonWindow() {
+        if (amazonUnder && AmazonQs.up() && panel != null && panel.isShowing()) panel.bringToTop();
+    }
+
+    /**
+     * From {@link Panel} once its window is gone: Amazon's overlay that started with it and is
+     * still up gets one BACK. Not when the cog closed the panel: that press reached Amazon's
+     * overlay as well (the lock is off while it is up) and closes it.
+     */
+    void panelClosed() {
+        if (!amazonUnder || !AmazonQs.up()) return;
+        if (SystemClock.uptimeMillis() - cogClosedAt < ATTRIBUTE_MS && !AmazonQs.locked(this)) return;
+        ui.postDelayed(this::backToAmazon, BACK_AFTER_MS);
+    }
+
+    /**
+     * The last way to close Amazon's overlay: BACK from Guard, which lands on it as it is the top
+     * window. Only while Amazon's own broadcast says it is up, as on anything else BACK would leave
+     * an app or an HDMI input.
+     */
+    private void backToAmazon() {
+        if (!amazonUnder || !AmazonQs.up()) return;
+        if (panel != null && panel.isShowing()) return;
+        Log.i(TAG, "Amazon quick settings still up without the panel; asking Guard for BACK");
+        sendBroadcast(new Intent(ACTION_AMAZON_BACK).setPackage("tv.dumbtv.home"));
+    }
+
+    /** Asks dumbtv home again whether the panel replaces Amazon's, and sets the lock to match. */
+    private void syncLock() {
+        askHome(true, (ok, res) -> {
+            panelOn = ok || !isHomeInstalled(this);
+            applyLock();
+        });
+    }
+
+    /**
+     * The lock is on while the panel replaces Amazon's and Amazon's overlay is not up. While it is
+     * up (a long press of HOME opened it, or it started under the panel), the cog reaches it again
+     * and closes it the way it always did, while the panel opens or closes for the same press.
+     */
+    private void applyLock() {
+        if (SystemClock.uptimeMillis() < unlockedUntil) return;
+        AmazonQs.lock(this, panelOn && !AmazonQs.up());
+    }
+
+    private interface Answer {
+        void on(boolean ok, Bundle res);
+    }
+
+    /**
+     * Asks dumbtv home's Guard whether the panel replaces Amazon's (installed, switched on, no
+     * child lock). {@code query} asks without a press. No answer (Guard not running) is a no.
+     */
+    private void askHome(boolean query, Answer answer) {
         Intent i = new Intent(ACTION_SETTINGS_KEY).setPackage("tv.dumbtv.home");
+        if (query) i.putExtra("query", true);
         sendOrderedBroadcast(i, null, new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
-                if (getResultCode() == Activity.RESULT_OK) {
-                    suppressAmazonQuickSettings();
-                    Bundle res = getResultExtras(false);
-                    int accent = res != null ? res.getInt("accent", 0xFF3D8BFF) : 0xFF3D8BFF;
-                    String from = res != null ? res.getString("from") : null;
-                    String idlePause = res != null ? res.getString("idle_pause") : null;
-                    int idleMin = res != null ? res.getInt("idle_minutes", 0) : 0;
-                    ui.post(() -> {
-                        if (panel != null) panel.show(accent, from, idlePause, idleMin);
-                    });
-                } else if (!isHomeInstalled(context)) {
-                    ui.post(() -> {
-                        if (panel != null) panel.show(null);
-                    });
-                }
+                answer.on(getResultCode() == Activity.RESULT_OK, getResultExtras(false));
             }
-        }, null, Activity.RESULT_CANCELED, null, null);
-    }
-
-    static void suppressAmazonQuickSettings(Context c) {
-        ActivityManager am = (ActivityManager) c.getSystemService(ACTIVITY_SERVICE);
-        if (am == null) return;
-        try {
-            am.killBackgroundProcesses("com.amazon.tv.quicksettings.ui");
-            am.killBackgroundProcesses("com.amazon.tv.quicksettings");
-        } catch (SecurityException ignored) {}
-    }
-
-    private void suppressAmazonQuickSettings() {
-        suppressAmazonQuickSettings(this);
+        }, ui, Activity.RESULT_CANCELED, null, null);
     }
 
     private static boolean isHomeInstalled(Context c) {

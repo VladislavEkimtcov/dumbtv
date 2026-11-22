@@ -6,6 +6,8 @@
 #   video format pm grant READ_LOGS (it reads the display service's log tag only)
 #   sleep timer  dpm set-active-admin (force-lock only)
 #   noise meter  pm grant RECORD_AUDIO, only with --mic (or MIC=1)
+#   cog button   pm grant WRITE_SECURE_SETTINGS, for Amazon's own quick_settings_lock: while the
+#                panel is switched on, Amazon's quick settings ignores the cog (AmazonQs.java)
 #   ./quick/install.sh          build, install, grant
 #   ./quick/install.sh --mic    the same, plus the microphone for the noise row
 #   ./quick/install.sh --undo   give up the device admin, then uninstall
@@ -31,6 +33,12 @@ if [[ ${1:-} == --undo ]]; then
   else
     echo "$PKG is not installed"
   fi
+  # Undo.java takes the lock off; this covers an app that was already gone or never answered.
+  # Amazon reads a missing setting as 0, which is how a Fire TV comes.
+  if [[ $(sh_ settings get secure quick_settings_lock | tr -d '\r') == 1 ]]; then
+    sh_ settings delete secure quick_settings_lock >/dev/null
+    echo "Amazon's quick settings lock taken off"
+  fi
   exit 0
 fi
 [[ -z ${1:-} || ${1:-} == --mic ]] || { echo "usage: $0 [--mic | --undo]" >&2; exit 2; }
@@ -42,6 +50,8 @@ out=$(adb_ install -r build/dumbtv-quick.apk 2>&1 | grep -m1 -E 'Success|Failure
 sh_ appops set $PKG WRITE_SETTINGS allow
 sh_ appops set $PKG SYSTEM_ALERT_WINDOW allow
 sh_ pm grant $PKG android.permission.READ_LOGS
+sh_ pm grant $PKG android.permission.WRITE_SECURE_SETTINGS 2>/dev/null ||
+  echo "warning: WRITE_SECURE_SETTINGS was not granted; Amazon's quick settings will still start on the cog, and the panel closes it" >&2
 if [[ ${MIC:-0} == 1 || ${1:-} == --mic ]]; then
   sh_ pm grant $PKG android.permission.RECORD_AUDIO 2>/dev/null || true
 fi

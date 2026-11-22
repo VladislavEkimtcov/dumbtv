@@ -10,8 +10,9 @@ import android.content.Intent;
  * dumbtv quick settings (quick/ in this repository), when it is installed: the panel that slides
  * in from the right with brightness, Bluetooth, warmth, a sleep timer and a status strip. It is a
  * separate app so that dumbtv home keeps its single permission; the permissions the panel needs
- * are granted to it alone by quick/install.sh. The remote's settings (cog) button opens it, through
- * {@link Guard}; the Settings chip on the home screen opens the TV's own settings.
+ * are granted to it alone by quick/install.sh. The remote's settings (cog) button opens it (the
+ * panel's own service reads the press and asks {@link Guard} whether it is switched on here); the
+ * Settings chip on the home screen opens the TV's own settings.
  */
 final class Quick {
     static final String PACKAGE = "tv.dumbtv.quick";
@@ -51,25 +52,6 @@ final class Quick {
         return new Intent(ACTION).setPackage(PACKAGE)
                 .putExtra(EXTRA_ACCENT, accent)
                 .putExtra(EXTRA_FROM, from);
-    }
-
-    /**
-     * From {@link Guard}, over whatever app is in front, in a task of its own. The panel is
-     * singleTop: a second press while it is showing reaches its onNewIntent, which closes it.
-     */
-    static boolean open(Context c, int accent) {
-        Intent i = intent(accent, "app");
-        try {
-            c.sendBroadcast(new Intent("tv.dumbtv.quick.SHOW").setPackage(PACKAGE).putExtras(i));
-            return true;
-        } catch (Exception ignored) {}
-        Intent act = intent(accent, "app").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        try {
-            c.startActivity(act, ActivityOptions.makeCustomAnimation(c, 0, 0).toBundle());
-            return true;
-        } catch (ActivityNotFoundException | SecurityException e) {
-            return false;
-        }
     }
 
     static boolean open(Activity a, int accent, String from, String idlePause, int idleMinutes) {

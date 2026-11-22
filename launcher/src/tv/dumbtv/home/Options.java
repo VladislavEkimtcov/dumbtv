@@ -3,6 +3,7 @@ package tv.dumbtv.home;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
+import android.content.Intent;
 import android.graphics.drawable.StateListDrawable;
 import android.media.tv.TvInputManager;
 import android.os.Bundle;
@@ -154,6 +155,11 @@ public final class Options extends Activity {
         int i = Arrays.asList(c.values).indexOf(cfg.get(c));
         cfg.set(c.key, c.values[((i + by) % n + n) % n]);
         refresh();
+        // Both decide whether the cog opens the panel or Amazon's quick settings; the panel keeps
+        // Amazon's lock to match (quick/AmazonQs.java). Its next press would put it right anyway.
+        if (c == Config.QUICK || c == Config.LOCK) {
+            sendBroadcast(new Intent("tv.dumbtv.quick.SYNC").setPackage(Quick.PACKAGE));
+        }
         if (c == Config.LOCK && "on".equals(cfg.get(c))) {
             Toast.makeText(this, getString(R.string.lock_on, (int) (Home.UNLOCK_MS / 1000)),
                     Toast.LENGTH_LONG).show();

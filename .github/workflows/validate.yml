@@ -89,12 +89,14 @@ jobs:
         run: |
           javac --release 8 -Xlint:all -Werror -d /tmp/quick quick/src/tv/dumbtv/quick/Sun.java \
             quick/src/tv/dumbtv/quick/Video.java quick/src/tv/dumbtv/quick/Health.java \
-            quick/src/tv/dumbtv/quick/AirPlay.java quick/tests/SunTest.java quick/tests/VideoTest.java \
-            quick/tests/HealthTest.java quick/tests/AirPlayTest.java
+            quick/src/tv/dumbtv/quick/AirPlay.java quick/src/tv/dumbtv/quick/LogLines.java \
+            quick/tests/SunTest.java quick/tests/VideoTest.java quick/tests/HealthTest.java \
+            quick/tests/AirPlayTest.java quick/tests/LogLinesTest.java
           java -cp /tmp/quick tv.dumbtv.quick.SunTest
           java -cp /tmp/quick tv.dumbtv.quick.VideoTest
           java -cp /tmp/quick tv.dumbtv.quick.HealthTest
           java -cp /tmp/quick tv.dumbtv.quick.AirPlayTest
+          java -cp /tmp/quick tv.dumbtv.quick.LogLinesTest
 
   scripts:
     runs-on: ubuntu-latest
