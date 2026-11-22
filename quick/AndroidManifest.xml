@@ -20,8 +20,10 @@
 
     <!-- Granted over adb (install.sh):
          brightness (appops WRITE_SETTINGS), warmth and picture off (appops SYSTEM_ALERT_WINDOW),
-         video format and AirPlay events (pm grant READ_LOGS), and mic noise meter (pm grant RECORD_AUDIO). -->
+         video format and AirPlay events (pm grant READ_LOGS), mic noise meter (pm grant RECORD_AUDIO),
+         and Amazon's quick settings lock, so the cog opens only this panel (pm grant WRITE_SECURE_SETTINGS). -->
     <uses-permission android:name="android.permission.WRITE_SETTINGS" />
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.READ_LOGS" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />

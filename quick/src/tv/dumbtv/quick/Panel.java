@@ -107,8 +107,6 @@ public final class Panel {
 
     private int accent = DEFAULT_ACCENT;
     private boolean fromHome, showing, closing;
-    private long ignoreBackUntil;
-    private long lastBroughtToTopAt;
     private View activeShield;
     private Bitmap activeShieldBmp;
 
@@ -165,10 +163,6 @@ public final class Panel {
         build();
     }
 
-    public void ignoreNextBack() {
-        ignoreBackUntil = SystemClock.uptimeMillis() + 600;
-    }
-
     public void show(Intent intent) {
         SharedPreferences p = Tint.prefs(context);
         int acc = p.getInt(ACCENT, DEFAULT_ACCENT);
@@ -209,7 +203,6 @@ public final class Panel {
             try {
                 wm.addView(root, lp);
                 showing = true;
-                context.sendBroadcast(new Intent("tv.dumbtv.home.PANEL_OPEN").setPackage("tv.dumbtv.home"));
             } catch (RuntimeException e) {
                 Log.w(Tint.TAG, "quick settings: could not add overlay window", e);
                 showing = false;
@@ -237,13 +230,15 @@ public final class Panel {
         slide(true);
     }
 
+    /**
+     * Puts the panel's window back above a window that was added after it (Amazon's quick settings,
+     * where nothing else kept it from opening): a snapshot of the panel covers the swap, so the
+     * re-added window does not flash, and focus stays on the same row. A call while a swap is
+     * under way is that swap.
+     */
     public void bringToTop() {
         if (!showing || closing || root == null || !root.isAttachedToWindow() || wm == null) return;
-        long now = SystemClock.uptimeMillis();
-        if (now - lastBroughtToTopAt < 1000) return;
-        lastBroughtToTopAt = now;
-
-        cleanShield();
+        if (activeShield != null) return;
 
         Row focused = focusedRow();
         final int focusedIndex = focused != null ? rows.indexOf(focused) : -1;
@@ -380,16 +375,6 @@ public final class Panel {
                 boolean down = e.getAction() == KeyEvent.ACTION_DOWN;
                 switch (code) {
                     case KeyEvent.KEYCODE_BACK:
-                        if (SystemClock.uptimeMillis() < ignoreBackUntil) {
-                            Log.i(Tint.TAG, "ignoring synthetic BACK during Amazon QS suppression");
-                            if (wm != null && root != null && root.isAttachedToWindow()) {
-                                try {
-                                    wm.updateViewLayout(root, root.getLayoutParams());
-                                } catch (Exception ignored) {}
-                                root.requestFocus();
-                            }
-                            return true;
-                        }
                         if (down && e.getRepeatCount() == 0) close();
                         return true;
                     case KeyEvent.KEYCODE_MENU:
@@ -649,8 +634,7 @@ public final class Panel {
                 wm.removeView(root);
             } catch (RuntimeException ignored) {}
         }
-        context.sendBroadcast(new Intent("tv.dumbtv.home.PANEL_CLOSED").setPackage("tv.dumbtv.home"));
-        Tint.suppressAmazonQuickSettings(context);
+        if (context instanceof Tint) ((Tint) context).panelClosed();
         if (fromHome && idlePauseResult != null) {
             Intent res = new Intent("tv.dumbtv.home.SET_IDLE_PAUSE").setPackage("tv.dumbtv.home");
             res.putExtra("idle_pause", idlePauseResult);

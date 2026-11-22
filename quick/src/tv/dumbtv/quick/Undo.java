@@ -9,7 +9,7 @@ import android.content.Intent;
 /**
  * Gets this app ready to be uninstalled: gives up the device admin (dpm remove-active-admin only
  * removes test admins, and Android refuses to uninstall an active admin), cancels the sleep timer
- * and removes the warmth. The manifest requires android.permission.DUMP, which adb's shell holds
+ * removes the warmth and gives the cog back to Amazon's quick settings. The manifest requires android.permission.DUMP, which adb's shell holds
  * and installed apps cannot, so only quick/install.sh --undo reaches it:
  *   adb shell am broadcast -n tv.dumbtv.quick/.Undo
  */
@@ -19,6 +19,7 @@ public final class Undo extends BroadcastReceiver {
         Sleep.set(c, 0);
         Warmth.restore(c);
         Tint.prefs(c).edit().clear().apply();
+        AmazonQs.lock(c, false);
         c.stopService(new Intent(c, Tint.class));
         ((DevicePolicyManager) c.getSystemService(Context.DEVICE_POLICY_SERVICE))
                 .removeActiveAdmin(new ComponentName(c, Admin.class));

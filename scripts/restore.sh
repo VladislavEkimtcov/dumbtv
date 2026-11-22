@@ -122,6 +122,9 @@ if dev pm list packages tv.dumbtv.quick | tr -d '\r' | grep -q '^package:tv.dumb
     note "WARNING: could not remove dumbtv quick settings; run ./quick/install.sh --undo"
   fi
 fi
+# Set by dumbtv quick settings so the cog skips Amazon's quick settings; a quick app removed by
+# hand leaves it, and the cog would then do nothing.
+acmd settings delete secure quick_settings_lock >/dev/null 2>&1
 
 step "settings"
 while read -r ns key value; do

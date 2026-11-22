@@ -47,31 +47,29 @@ import android.view.accessibility.AccessibilityEvent;
  * its settings grid, are left alone, as is a wake before any window was seen.
  *
  * The remote's settings (cog) button never reaches an app or an accessibility key filter: Fire
- * OS's key policy sends it as a GLOBAL_BUTTON broadcast to Amazon's quick settings, which draws an
- * overlay window from {@link #AMAZON_QS}. Where dumbtv quick settings is installed and enabled
- * ({@link Quick#enabled}), that window's appearance is the signal: BACK closes it, and our panel
- * opens in its place, through {@link Home} when the home screen is in front.
+ * OS's key policy sends it as a GLOBAL_BUTTON broadcast to Amazon's quick settings. dumbtv quick
+ * settings, where installed, reads the press from the log and asks this service, with the ordered
+ * broadcast {@link #ACTION_SETTINGS_KEY}, whether its panel replaces Amazon's here
+ * ({@link Quick#enabled}); it keeps Amazon's overlay from opening itself (quick/AmazonQs.java).
+ * This service only passes on what it alone sees: a window of {@link #AMAZON_QS} coming to the
+ * front, and, when the panel asks for it, the BACK that is the last way to close that window.
  */
 public final class Guard extends AccessibilityService {
     static final String AMAZON = "com.amazon.tv.launcher";
     private static final String AMAZON_HOME = "com.amazon.tv.launcher.ui.HomeActivity_vNext";
     static final String AMAZON_QS = "com.amazon.tv.quicksettings.ui";
     static final String ACTION_SETTINGS_KEY = "tv.dumbtv.home.KEY_SETTINGS";
-    static final String ACTION_PANEL_OPEN = "tv.dumbtv.home.PANEL_OPEN";
-    static final String ACTION_PANEL_CLOSED = "tv.dumbtv.home.PANEL_CLOSED";
-    /** After BACK has closed Amazon's overlay, so that key cannot land on our panel instead. */
-    private static final long QUICK_AFTER_BACK_MS = 250;
-    /** One overlay sends several window events; one BACK only, or a second one leaves an input. */
-    private static final long QUICK_DEBOUNCE_MS = 1500;
+    /** From dumbtv quick settings: Amazon's overlay outlived the panel and its own toggle. */
+    static final String ACTION_AMAZON_BACK = "tv.dumbtv.home.AMAZON_QS_BACK";
+    private static final String QUICK_AMAZON_WINDOW = "tv.dumbtv.quick.AMAZON_WINDOW";
+    /** One BACK per overlay: a second one would leave the app or input beneath it. */
+    private static final long BACK_DEBOUNCE_MS = 1500;
     private static final long COVER_MAX_MS = 1500;
     private static final long LAUNCH_FALLBACK_MS = 150;
     private static final long SHOWN_DELAY_MS = Build.VERSION.SDK_INT >= 34 ? 300 : 0;
 
     private static volatile boolean paused;
     private static Guard running;
-    private volatile boolean panelShowing;
-    private volatile boolean amazonQsActive;
-    private volatile long amazonQsOpenedAt;
     /**
      * elapsedRealtime of the last screen-on, 0 once {@link Home} has acted on it. Home reads it to
      * go on to the {@code wake_input} from home.conf; the resume and the broadcast arrive in either
@@ -84,9 +82,10 @@ public final class Guard extends AccessibilityService {
     private final Runnable launch = () -> home(this);
     private final HomeRetry homeRetry = new HomeRetry();
     private final Runnable retry = this::retryHome;
-    private final Runnable openQuick = () -> {
-        if (!(Home.inFront && Home.openQuick())) Quick.open(this, Config.get(this).accent());
-    };
+    /**
+     * The panel's question for each press, and with {@code query} for no press: OK with the accent
+     * and where the press landed when the panel replaces Amazon's, no answer when it does not.
+     */
     private final BroadcastReceiver settingsKeyReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context c, Intent intent) {
@@ -112,52 +111,25 @@ public final class Guard extends AccessibilityService {
                 }
                 setResultExtras(res);
             }
-            settingsKeyAt = SystemClock.uptimeMillis();
-            if (!intent.getBooleanExtra("close", false)) {
-                amazonQsActive = true;
-                amazonQsOpenedAt = settingsKeyAt;
-                panelShowing = true;
-            }
-            if (intent.getBooleanExtra("close", false)) return;
-            if (!isOrderedBroadcast()) {
-                handler.removeCallbacks(openQuick);
-                handler.post(openQuick);
-            }
         }
     };
-    private long settingsKeyAt = -QUICK_DEBOUNCE_MS;
-    private long quickReplacedAt = -QUICK_DEBOUNCE_MS;
+    private long amazonBackAt = -BACK_DEBOUNCE_MS;
     private View cover;
     private boolean onAmazonHome;
 
-    private final BroadcastReceiver panelReceiver = new BroadcastReceiver() {
+    /**
+     * dumbtv quick settings sends this only after its panel's window is gone and while Amazon's
+     * own broadcast says its overlay is up, so the BACK reaches that overlay and nothing else.
+     */
+    private final BroadcastReceiver amazonBackReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context c, Intent intent) {
-            if (intent == null) return;
-            String act = intent.getAction();
-            if (ACTION_PANEL_OPEN.equals(act)) {
-                panelShowing = true;
-            } else if (ACTION_PANEL_CLOSED.equals(act)) {
-                panelShowing = false;
-                dismissAmazonQsIfNeeded(50);
-            }
+            long now = SystemClock.uptimeMillis();
+            if (now - amazonBackAt < BACK_DEBOUNCE_MS) return;
+            amazonBackAt = now;
+            performGlobalAction(GLOBAL_ACTION_BACK);
         }
     };
-
-    private void dismissAmazonQsIfNeeded(long delayMs) {
-        if (!amazonQsActive) return;
-        long now = SystemClock.uptimeMillis();
-        if (now - amazonQsOpenedAt > 45000) {
-            amazonQsActive = false;
-            return;
-        }
-        handler.postDelayed(() -> {
-            if (amazonQsActive) {
-                amazonQsActive = false;
-                performGlobalAction(GLOBAL_ACTION_BACK);
-            }
-        }, delayMs);
-    }
 
     private final BroadcastReceiver screenOn = new BroadcastReceiver() {
         @Override
@@ -233,10 +205,7 @@ public final class Guard extends AccessibilityService {
         cover = view;
         registerReceiver(screenOn, new IntentFilter(Intent.ACTION_SCREEN_ON));
         registerReceiver(settingsKeyReceiver, new IntentFilter(ACTION_SETTINGS_KEY));
-        IntentFilter panelFilter = new IntentFilter();
-        panelFilter.addAction(ACTION_PANEL_OPEN);
-        panelFilter.addAction(ACTION_PANEL_CLOSED);
-        registerReceiver(panelReceiver, panelFilter);
+        registerReceiver(amazonBackReceiver, new IntentFilter(ACTION_AMAZON_BACK));
         Filter.watch(this);
     }
 
@@ -245,7 +214,6 @@ public final class Guard extends AccessibilityService {
         cancelRetry();
         handler.removeCallbacks(uncover);
         handler.removeCallbacks(launch);
-        handler.removeCallbacks(openQuick);
         try {
             unregisterReceiver(screenOn);
         } catch (IllegalArgumentException ignored) {
@@ -255,7 +223,7 @@ public final class Guard extends AccessibilityService {
         } catch (IllegalArgumentException ignored) {
         }
         try {
-            unregisterReceiver(panelReceiver);
+            unregisterReceiver(amazonBackReceiver);
         } catch (IllegalArgumentException ignored) {
         }
         if (cover != null) ((WindowManager) getSystemService(WINDOW_SERVICE)).removeView(cover);
@@ -269,31 +237,18 @@ public final class Guard extends AccessibilityService {
         CharSequence pkg = e.getPackageName(), cls = e.getClassName();
         if (pkg == null) return;
         if (AMAZON_QS.contentEquals(pkg)) {
-            long now = SystemClock.uptimeMillis();
-            boolean fromSettingsKey = panelShowing || (now - settingsKeyAt < 1500);
-            if (!fromSettingsKey) {
-                // Vanilla quick settings opened intentionally (e.g. via long-holding HOME).
-                // Do not intercept, dismiss, or overtake with custom panel.
-                return;
-            }
-            amazonQsActive = true;
-            amazonQsOpenedAt = now;
-            if (panelShowing) {
-                sendBroadcast(new Intent("tv.dumbtv.quick.BRING_TO_TOP").setPackage("tv.dumbtv.quick"));
-                return;
-            }
-            replaceQuickSettings();
+            // An overlay over whatever is in front: the panel decides whether it stays.
+            sendBroadcast(new Intent(QUICK_AMAZON_WINDOW).setPackage(Quick.PACKAGE));
             return;
         }
         if (!AMAZON.contentEquals(pkg)) {
-            if ("tv.dumbtv.quick".contentEquals(pkg) || "com.android.systemui".contentEquals(pkg) || "android".contentEquals(pkg)) return;
+            if (Quick.PACKAGE.contentEquals(pkg) || "com.android.systemui".contentEquals(pkg) || "android".contentEquals(pkg)) return;
             boolean own = getPackageName().contentEquals(pkg);
             if (own && !OwnWindow.showsWhatIsInFront(cls, View.class.getName(),
                     Home.class.getName(), Home.inFront)) return;
             cancelRetry();
             onAmazonHome = false;
             paused = false;
-            if (!panelShowing) amazonQsActive = false;
             if (!own) arrived(this);
             return;
         }
@@ -304,18 +259,6 @@ public final class Guard extends AccessibilityService {
         }
         homeRetry.request();
         retryHome();
-    }
-
-    /** Amazon's quick settings overlay opened: put ours in its place, where it is enabled. */
-    private void replaceQuickSettings() {
-        Config cfg = Config.get(this);
-        cfg.refresh();
-        if (!Quick.enabled(this, cfg)) return;
-        long now = SystemClock.uptimeMillis();
-        if (now - quickReplacedAt < QUICK_DEBOUNCE_MS) return;
-        quickReplacedAt = now;
-        sendBroadcast(new Intent("tv.dumbtv.quick.IGNORE_BACK").setPackage("tv.dumbtv.quick"));
-        handler.postDelayed(() -> performGlobalAction(GLOBAL_ACTION_BACK), 50);
     }
 
     /** Retain a throttled HOME event: Fire OS may leave Amazon Home on top after a burst. */
