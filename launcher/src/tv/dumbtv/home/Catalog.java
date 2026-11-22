@@ -68,9 +68,11 @@ final class Catalog {
     static void art(Context c, Item it, boolean cornerIcon, Drawable replacement) {
         if (it.info == null) return;
         PackageManager pm = c.getPackageManager();
+        Drawable builtin = builtin(c, it.info.packageName);
         boolean wide = replacement != null && isWide(replacement);
-        it.banner = wide ? replacement : replacement == null ? it.info.loadBanner(pm) : null;
+        it.banner = wide ? replacement : (replacement == null && builtin == null) ? it.info.loadBanner(pm) : null;
         it.icon = replacement != null && !wide ? replacement
+                : builtin != null ? builtin
                 : it.banner == null || cornerIcon ? sharpIcon(c, it.info) : null;
     }
 
@@ -83,14 +85,19 @@ final class Catalog {
         return "builtin_" + pkg.replace('.', '_');
     }
 
+    static Drawable builtin(Context c, String pkg) {
+        int own = c.getResources().getIdentifier(redrawn(pkg), "drawable", c.getPackageName());
+        return own != 0 ? c.getDrawable(own) : null;
+    }
+
     /**
      * The {@link #redrawn} copy when there is one, else the app's icon at the highest density it
      * ships rather than the TV's own (xhdpi on a 1080p Fire TV): tiles draw icons larger than a
      * launcher grid would, and the xhdpi bitmap blurs when it is scaled up.
      */
     static Drawable sharpIcon(Context c, ActivityInfo ai) {
-        int own = c.getResources().getIdentifier(redrawn(ai.packageName), "drawable", c.getPackageName());
-        if (own != 0) return c.getDrawable(own);
+        Drawable own = builtin(c, ai.packageName);
+        if (own != null) return own;
         int res = ai.getIconResource();
         if (res != 0) {
             try {
