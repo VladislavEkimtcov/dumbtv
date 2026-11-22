@@ -54,7 +54,6 @@ public final class Options extends Activity {
         Config.Choice startup = inputs.isEmpty() ? null : Input.choice(cfg, inputs);
 
         for (Config.Choice c : Config.CHOICES) {
-            if (c == Config.QUICK && !Quick.installed(this)) continue;
             list.addView(choice(c));
             if (c == Config.SWITCH && startup != null) list.addView(choice(startup));
         }
@@ -107,6 +106,8 @@ public final class Options extends Activity {
 
     private View choice(Config.Choice c) {
         LinearLayout row = row();
+        // Quick settings panel: listed only where dumbtv quick settings is installed.
+        if (c == Config.QUICK && !Quick.installed(this)) row.setVisibility(View.GONE);
         TextView name = label(Text.title(this, c));
         TextView value = Ui.text(this, 16, Ui.MUTED, Ui.MEDIUM);
         value.setGravity(Gravity.END);
