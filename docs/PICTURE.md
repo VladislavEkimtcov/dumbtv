@@ -17,6 +17,8 @@ Detects whatever input is currently playing on screen, identifies its picture mo
 ./scripts/picture.sh
 ```
 
+Live values come from the log since the last input switch: what the TV fetched or set (including `defaultSetCall` lines from remote-control changes, the same lines `--watch` shows). Values logged for an earlier input are left out. The preset column uses the live picture mode. If the log does not show one, there is no comparison until you pass `--mode`. `--source` picks a different preset input to compare against.
+
 Example output:
 ```text
 Active Port: HDMI 2 (Session ID: com.mediatek.tis/.HdmiInputService/HW3)
@@ -94,6 +96,10 @@ Compare the baseline hardware registers between two picture modes or two inputs 
 # Compare HDMI 1 vs HDMI 2:
 ./scripts/picture.sh --diff HDMI1 HDMI2 --mode PC
 ```
+
+Input, mode and HDR names are matched without regard to case (`--diff pc standard` works). Nested tables such as the white-balance gains under `Color_Temperature` are compared leaf by leaf (`Color_Temperature.Standard.R_Gain`).
+
+A name that is not in the TV's presetdb is an error that lists what is there, never an empty result. So "No differences found." always means two presets were actually compared. The same goes for an input with no preset file (analog and composite have none on the NS55F501), an unreadable or invalid JSON file, and a missing presetdb. When the TV has no presetdb for its own model (`ro.vendor.sys.idme.mfr_model`, e.g. `NS-55F501NA26` → `NS55F501`), the tool uses the closest one it finds and says so on stderr.
 
 ### 4. Inspect Factory Baseline Presets (`--preset`)
 Examine the vendor-defined preset profile for any input, mode, and HDR format without needing the input to be active:

@@ -16,8 +16,11 @@
 #
 # Flags:
 #   --serial <serial>    Target device (defaults to $ADB_SERIAL or connected device)
-#   --mode <mode>        Picture mode for preset inspection (default: PC)
-#   --hdr <type>         Signal format for preset inspection (default: SDR)
+#   --source <src>       Preset input for --preset, mode --diff and the default view (default: active input)
+#   --mode <mode>        Picture mode (default: PC; the live mode in the default view)
+#   --hdr <type>         Signal format (default: SDR; the live signal in the default view)
+#
+# Exits 1 with an error when the TV is unreachable or a preset is not in its presetdb.
 set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 

@@ -6,6 +6,9 @@ Reads:
   1. Live active input state and hardware parameters from the TV.
   2. Factory baseline preset databases from /vendor/tvconfig/.../presetdb/.
   3. Real-time setting adjustments via --watch as you configure an input with the remote.
+
+A preset that cannot be found is an error, never an empty result: an empty preset would
+read as "no differences" or "nothing customized".
 """
 
 import argparse
@@ -14,7 +17,6 @@ import os
 import re
 import subprocess
 import sys
-import time
 
 # Key parameters grouped by feature domain
 PARAM_CATEGORIES = {
@@ -72,24 +74,103 @@ PORT_MAP = {
     "HDMI100004": "HDMI (CEC)",
 }
 
-SOURCE_NAME_MAP = {
-    "HDMI 1": "HDMI1",
-    "HDMI 2": "HDMI2",
-    "HDMI 3": "HDMI3",
-    "HDMI 4": "HDMI4",
-    "DTV": "DTV",
-    "Antenna": "DTV",
-    "App": "App",
-    "Ambient": "Ambient",
-    "Composite": "COMPOSITE",
+# presetdb source names (<name>_initial.json) to try for each TIS hardware id, first
+# match wins. Checked against the files actually on the TV, case-insensitively. The
+# analog and composite names are guesses; when none exists the error lists what does.
+# HDMI100004 (a CEC session) is absent on purpose: the HDMI port behind it comes from
+# the log's "Current Source:" line instead.
+HW_SOURCES = {
+    "HW0": ["DTV"],
+    "HW1": ["ATV", "Analog"],
+    "HW2": ["HDMI1"],
+    "HW3": ["HDMI2"],
+    "HW4": ["HDMI3"],
+    "HW5": ["AV", "Composite", "CVBS"],
 }
 
-KNOWN_MODES = {
-    "standard", "pc", "custom", "game", "movie", "vivid", "sport",
-    "user", "dynamic", "natural", "filmmaker", "dolbyvisionbright",
-    "dolbyvisiondark", "dolbyvisioniq", "dolbyvisiongame", "dolbyvisionpc",
-    "dolbyvisioncustom"
-}
+PRESET_SUFFIX = "_initial.json"
+CURRENT_SOURCE_RE = re.compile(r"Current Source:\s*([A-Za-z0-9_]+)")
+PQCACHE_CONTEXT_RE = re.compile(r"<([A-Za-z0-9_]+),\s*([A-Za-z0-9_]+),\s*([A-Za-z0-9_]+)")
+PQCACHE_SET_RE = re.compile(r"set\(([A-Za-z0-9_]+),\s*([^)]+)\)")
+OEM_SET_RE = re.compile(r"defaultSetCall, successfully set\s*:\s*([A-Za-z0-9_]+)\s*:\s*(.+)")
+OEM_GET_RE = re.compile(r"defaultGetCall, fetched value for\s+([A-Za-z0-9_]+)\s*:\s*(.+)")
+
+
+class PresetLookupError(Exception):
+    """A preset source, mode or HDR format that is not in the TV's presetdb."""
+
+
+class DeviceError(Exception):
+    """adb cannot reach exactly one TV, or a command on it failed."""
+
+
+def warn(msg):
+    print(f"warning: {msg}", file=sys.stderr)
+
+
+def norm(name):
+    """Compare names the way a person types them: case, spaces, '-' and '_' ignored."""
+    return re.sub(r"[^a-z0-9]", "", str(name).lower())
+
+
+def pick(name, keys, what, where):
+    """The entry of `keys` that `name` means (exact, then normalized), or PresetLookupError."""
+    keys = [k for k in keys if not str(k).startswith("$")]
+    if name in keys:
+        return name
+    for k in keys:
+        if norm(k) == norm(name):
+            return k
+    avail = ", ".join(sorted(keys)) or "none"
+    raise PresetLookupError(f"no {what} '{name}' in {where}; available: {avail}")
+
+
+def model_dir_name(model):
+    """ro.vendor.sys.idme.mfr_model -> the presetdb model directory: NS-55F501NA26 -> NS55F501."""
+    model = model.strip().replace("-", "")
+    return re.sub(r"(NA|CA)\d{2}$", "", model, flags=re.IGNORECASE)
+
+
+def flatten(d, prefix=""):
+    """Nested preset values as dotted keys, so --diff compares every leaf.
+
+    A table that names its own selection ({"Standard": {...}, "Color_Temperature":
+    "Standard"} under Color_Temperature) keeps that selection under the plain key."""
+    out = {}
+    for k, v in d.items():
+        if prefix and k == prefix.split(".")[-1]:
+            key = prefix
+        else:
+            key = f"{prefix}.{k}" if prefix else k
+        if isinstance(v, dict):
+            out.update(flatten(v, key))
+        else:
+            out[key] = v
+    return out
+
+
+def parse_pq_line(line):
+    """Events in one logcat line, in the order they apply:
+    ("source", name)            an input switch
+    ("context", src, hdr, mode) a PqCache <src, hdr, mode> line
+    ("value", key, value)       a PQ value fetched or set (OEMService or PqCache)
+    """
+    events = []
+    m = CURRENT_SOURCE_RE.search(line)
+    if m:
+        events.append(("source", m.group(1)))
+    if "PqCache" in line:
+        m = PQCACHE_CONTEXT_RE.search(line)
+        if m:
+            events.append(("context", m.group(1), m.group(2), m.group(3)))
+        m = PQCACHE_SET_RE.search(line)
+        if m and m.group(1) != "Source":
+            events.append(("value", m.group(1), m.group(2).strip()))
+    for rx in (OEM_SET_RE, OEM_GET_RE):
+        m = rx.search(line)
+        if m:
+            events.append(("value", m.group(1), m.group(2).strip()))
+    return events
 
 
 class Colors:
@@ -110,6 +191,9 @@ class TvPictureQuality:
         self.serial = serial or os.environ.get("ADB_SERIAL") or os.environ.get("SERIAL")
         self.colors = Colors(color)
         self._preset_dir = None
+        self._preset_sources = None
+        self._preset_db = {}
+        self._logcat = None
 
     def _adb_cmd(self, *args):
         cmd = [self.adb]
@@ -118,138 +202,212 @@ class TvPictureQuality:
         cmd.extend(args)
         return cmd
 
+    def adb_result(self, *args):
+        """(returncode, stdout, stderr) of one adb command on the TV."""
+        try:
+            res = subprocess.run(self._adb_cmd(*args), stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True)
+        except FileNotFoundError:
+            raise DeviceError(f"adb not found ({self.adb}); install platform-tools or set ADB")
+        return res.returncode, res.stdout, res.stderr
+
     def run_adb(self, *args, check=True):
-        cmd = self._adb_cmd(*args)
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if check and res.returncode != 0:
-            raise RuntimeError(f"ADB error ({res.returncode}): {res.stderr.strip()}")
-        return res.stdout
+        rc, out, err = self.adb_result(*args)
+        if check and rc != 0:
+            raise DeviceError(f"adb {' '.join(args)} failed ({rc}): {err.strip() or out.strip()}")
+        return out
+
+    def check_device(self):
+        """Exactly one reachable TV, as scripts/lib.sh's need_device requires."""
+        try:
+            res = subprocess.run([self.adb, "devices"], stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True)
+        except FileNotFoundError:
+            raise DeviceError(f"adb not found ({self.adb}); install platform-tools or set ADB")
+        if res.returncode != 0:
+            raise DeviceError(f"adb devices failed: {res.stderr.strip()}")
+        states = {}
+        for line in res.stdout.splitlines()[1:]:
+            parts = line.split()
+            if len(parts) >= 2:
+                states[parts[0]] = parts[1]
+        if self.serial:
+            state = states.get(self.serial)
+            if state is None:
+                raise DeviceError(f"device {self.serial} is not attached; adb connect {self.serial}")
+            if state != "device":
+                raise DeviceError(f"device {self.serial} is {state}; on the TV, allow ADB debugging "
+                                  "or toggle it off and on")
+            return self.serial
+        found = [s for s, st in states.items() if st == "device"]
+        if not found:
+            raise DeviceError("no adb device. Enable ADB debugging on the TV, then: adb connect <tv-ip>:5555")
+        if len(found) > 1:
+            raise DeviceError(f"several devices attached; set ADB_SERIAL to the one you mean: {' '.join(found)}")
+        self.serial = found[0]
+        return self.serial
+
+    def logcat(self):
+        if self._logcat is None:
+            self._logcat = self.run_adb("logcat", "-d")
+        return self._logcat
+
+    def last_logged_source(self):
+        for line in reversed(self.logcat().splitlines()):
+            m = CURRENT_SOURCE_RE.search(line)
+            if m:
+                return m.group(1)
+        return None
 
     def get_active_input(self):
         """Identify what input is currently tuned and active on screen."""
-        out = self.run_adb("shell", "dumpsys", "tv_input", check=False)
+        out = self.run_adb("shell", "dumpsys", "tv_input")
         active_id = None
-        active_port = "Unknown"
         active_hw = None
+        active_port = "Unknown"
 
-        # Look in sessionStateMap for active hardware input
         m = re.search(r"inputId:\s*com\.mediatek\.tis/\.(HdmiInputService|CompositeInputService|AnalogInputService|AtscTunerInputService)/([A-Za-z0-9]+)", out)
         if m:
             active_id = m.group(0).split()[-1]
             active_hw = m.group(2)
             active_port = PORT_MAP.get(active_hw, active_hw)
-        else:
-            # Fallback: check logcat for last stream counter / Current Source
-            log_out = self.run_adb("logcat", "-d", "-t", "500", check=False)
-            for l in reversed(log_out.splitlines()):
-                m_src = re.search(r"Current Source:\s*([A-Za-z0-9_]+)", l)
-                if m_src:
-                    src_raw = m_src.group(1)
-                    active_port = src_raw
-                    active_hw = src_raw
-                    break
+
+        candidates = list(HW_SOURCES.get(active_hw, []))
+        if not candidates:
+            # No session, or one (HDMI-CEC) whose port the id does not say: use the log.
+            logged = self.last_logged_source()
+            if logged:
+                candidates = [logged]
+                if active_port == "Unknown":
+                    active_port = logged
 
         return {
             "id": active_id,
             "port": active_port,
             "hw": active_hw,
-            "source_key": SOURCE_NAME_MAP.get(active_port, active_hw or "HDMI1"),
+            "source_candidates": candidates,
         }
 
+    def active_preset_source(self, active_input=None):
+        """The presetdb source name for what is on screen, or PresetLookupError."""
+        info = active_input or self.get_active_input()
+        cands = info.get("source_candidates") or []
+        if not cands:
+            raise PresetLookupError("cannot tell which input is active (no TV input session, no "
+                                    "'Current Source:' in the log); pass --source")
+        sources = self.list_preset_sources()
+        for c in cands:
+            for s in sources:
+                if norm(s) == norm(c):
+                    return s
+        raise PresetLookupError(f"no preset file for {info.get('port')} (tried {', '.join(cands)}) "
+                                f"in {self._preset_dir}; available: {', '.join(sources) or 'none'}")
+
     def get_live_parameters(self):
-        """Fetch the most recent active PQ parameters applied to the display."""
-        log_out = self.run_adb("logcat", "-d", check=False)
+        """The PQ values last fetched or set for the current input, from the log.
+
+        Values logged before the last input switch belong to another input and are dropped."""
         params = {}
-        active_source = None
-        active_mode = None
-        active_hdr = None
-
-        for line in log_out.splitlines():
-            if "Current Source:" in line:
-                m = re.search(r"Current Source:\s*([A-Za-z0-9_]+)", line)
-                if m:
-                    active_source = m.group(1)
-            if "PqCache" in line:
-                m_mode = re.search(r"<([A-Za-z0-9_]+),\s*([A-Za-z0-9_]+),\s*([A-Za-z0-9_]+)", line)
-                if m_mode:
-                    active_source = m_mode.group(1)
-                    active_hdr = m_mode.group(2)
-                m_set = re.search(r"set\(([A-Za-z0-9_]+),\s*([^)]+)\)", line)
-                if m_set:
-                    params[m_set.group(1)] = m_set.group(2).strip()
-            m_get = re.search(r"MTSPQ-OEMService: defaultGetCall, fetched value for ([A-Za-z0-9_]+)\s*:\s*(.+)", line)
-            if m_get:
-                params[m_get.group(1)] = m_get.group(2).strip()
-
-        active_mode = params.get("Picture_Mode", active_mode)
-        active_hdr = params.get("HdrType", active_hdr or "SDR")
+        source = hdr = ctx_mode = None
+        for line in self.logcat().splitlines():
+            for ev in parse_pq_line(line):
+                if ev[0] == "source":
+                    if source is None or norm(ev[1]) != norm(source):
+                        params, hdr, ctx_mode = {}, None, None
+                    source = ev[1]
+                elif ev[0] == "context":
+                    source = source or ev[1]
+                    hdr, ctx_mode = ev[2], ev[3]
+                else:
+                    params[ev[1]] = ev[2]
 
         return {
-            "source": active_source,
-            "mode": active_mode,
-            "hdr": active_hdr,
+            "source": source,
+            "mode": params.get("Picture_Mode") or ctx_mode,
+            "hdr": params.get("HdrType") or hdr,
             "params": params,
         }
 
     def find_preset_dir(self):
-        """Locate the /vendor/tvconfig/.../presetdb directory on the TV."""
+        """Locate this model's /vendor/tvconfig/.../pq/presetdb directory on the TV."""
         if self._preset_dir:
             return self._preset_dir
 
-        # Try to find model-specific dir first
-        model_out = self.run_adb("shell", "getprop", "ro.vendor.sys.idme.mfr_model", check=False).strip()
-        short_model = model_out.split("-")[-1].replace("NA26", "").replace("CA26", "") if model_out else ""
+        model = self.run_adb("shell", "getprop", "ro.vendor.sys.idme.mfr_model").strip()
+        model_dir = model_dir_name(model) if model else ""
 
-        check_paths = [
-            f"/vendor/tvconfig/model/hydrot/{short_model}/pq/presetdb" if short_model else None,
-            "/vendor/tvconfig/model/hydrot/NS55F501/pq/presetdb",
-            "/vendor/tvconfig/bsp/chip/mt5873/pq/presetdb",
-        ]
-        for p in check_paths:
-            if not p:
-                continue
-            out = self.run_adb("shell", f"[ -d '{p}' ] && echo 'found'", check=False).strip()
-            if "found" in out:
-                self._preset_dir = p
-                return p
+        out = self.run_adb("shell", "ls -d /vendor/tvconfig/*/*/pq/presetdb "
+                           "/vendor/tvconfig/*/*/*/pq/presetdb 2>/dev/null", check=False)
+        found = [l.strip() for l in out.splitlines() if l.strip().endswith("/presetdb")]
+        if not found:
+            return None
 
-        # Generic search
-        out = self.run_adb("shell", "ls -d /vendor/tvconfig/*/*/pq/presetdb 2>/dev/null", check=False).splitlines()
-        for candidate in out:
-            candidate = candidate.strip()
-            if candidate:
-                self._preset_dir = candidate
-                return candidate
+        if model_dir:
+            for d in found:
+                if any(part.lower() == model_dir.lower() for part in d.split("/")):
+                    self._preset_dir = d
+                    return d
+        chosen = next((d for d in found if "/model/" in d), found[0])
+        warn(f"no presetdb for model {model or 'unknown'} ({model_dir or '?'}); using {chosen}, "
+             "which may be another model's or the chip's generic presets")
+        self._preset_dir = chosen
+        return chosen
 
-        return None
+    def require_preset_dir(self):
+        d = self.find_preset_dir()
+        if not d:
+            raise PresetLookupError("no presetdb directory under /vendor/tvconfig on this TV")
+        return d
+
+    def list_preset_sources(self):
+        """Source names that have a <name>_initial.json in the presetdb."""
+        if self._preset_sources is None:
+            d = self.require_preset_dir()
+            out = self.run_adb("shell", "ls", d)
+            self._preset_sources = sorted(
+                n[:-len(PRESET_SUFFIX)] for n in (l.strip() for l in out.split()) if n.endswith(PRESET_SUFFIX))
+        return self._preset_sources
+
+    def resolve_source(self, name):
+        return pick(name, self.list_preset_sources(), "preset source", self._preset_dir)
+
+    def load_preset_db(self, source):
+        """The parsed <source>_initial.json; `source` must already be resolved."""
+        if source not in self._preset_db:
+            path = f"{self.require_preset_dir()}/{source}{PRESET_SUFFIX}"
+            rc, raw, err = self.adb_result("shell", "cat", path)
+            if rc != 0 or not raw.strip():
+                raise PresetLookupError(f"cannot read {path}: {err.strip() or raw.strip() or 'empty file'}")
+            try:
+                self._preset_db[source] = json.loads(raw)
+            except ValueError as e:
+                raise PresetLookupError(f"{path} is not valid JSON: {e}")
+        return self._preset_db[source]
+
+    def lookup_preset(self, source, mode, hdr):
+        """Resolve names case-insensitively; returns (source, mode, hdr, settings)."""
+        src = self.resolve_source(source)
+        where = f"{src}{PRESET_SUFFIX}"
+        pq_val = self.load_preset_db(src).get("Preset_PQ_Value", {})
+        m = pick(mode, pq_val.keys(), "picture mode", where)
+        by_hdr = pq_val[m]
+        if not isinstance(by_hdr, dict):
+            raise PresetLookupError(f"{where}: mode {m} is not a table of HDR formats")
+        h = pick(hdr, by_hdr.keys(), "HDR format", f"{where} mode {m}")
+        settings = by_hdr[h]
+        if not isinstance(settings, dict):
+            raise PresetLookupError(f"{where}: {m}/{h} is not a table of settings")
+        return src, m, h, settings
 
     def get_preset_settings(self, source="HDMI1", mode="Standard", hdr="SDR"):
-        """Read factory preset JSON for a source, picture mode, and HDR format."""
-        preset_dir = self.find_preset_dir()
-        if not preset_dir:
-            return {}
-
-        json_path = f"{preset_dir}/{source}_initial.json"
-        raw = self.run_adb("shell", "cat", json_path, check=False)
-        try:
-            data = json.loads(raw)
-            pq_val = data.get("Preset_PQ_Value", {})
-            return pq_val.get(mode, {}).get(hdr, {})
-        except Exception:
-            return {}
+        """Factory preset for a source, picture mode and HDR format; raises PresetLookupError."""
+        return self.lookup_preset(source, mode, hdr)[3]
 
     def get_available_preset_modes(self, source="HDMI1"):
-        """List all available picture modes in the preset database."""
-        preset_dir = self.find_preset_dir()
-        if not preset_dir:
-            return []
-        raw = self.run_adb("shell", "cat", f"{preset_dir}/{source}_initial.json", check=False)
-        try:
-            data = json.loads(raw)
-            pq_val = data.get("Preset_PQ_Value", {})
-            return [k for k in pq_val.keys() if not k.startswith("$")]
-        except Exception:
-            return []
+        """All picture modes in a source's preset database."""
+        src = self.resolve_source(source)
+        pq_val = self.load_preset_db(src).get("Preset_PQ_Value", {})
+        return [k for k in pq_val.keys() if not k.startswith("$")]
 
     def format_table(self, title, params, preset_params=None):
         """Format parameters cleanly grouped by category."""
@@ -313,84 +471,72 @@ class TvPictureQuality:
         try:
             for line in proc.stdout:
                 line = line.strip()
+                t = line[:18]
                 if "Current Source:" in line:
-                    m = re.search(r"Current Source:\s*([A-Za-z0-9_]+)", line)
+                    m = CURRENT_SOURCE_RE.search(line)
                     if m:
-                        t = line[:18]
                         print(f"[{t}] {self.colors.blue('INPUT SWITCH')}: Current Source -> {self.colors.bold(m.group(1))}")
                 elif "defaultSetCall, successfully set" in line:
-                    m = re.search(r"successfully set\s*:\s*([A-Za-z0-9_]+)\s*:\s*(.+)", line)
+                    m = OEM_SET_RE.search(line)
                     if m:
-                        t = line[:18]
                         k, v = m.group(1), m.group(2).strip()
                         print(f"[{t}] {self.colors.green('SET')}: {k:<25} = {self.colors.bold(v)}")
                 elif "PqCache" in line and "set(" in line:
-                    m = re.search(r"set\(([A-Za-z0-9_]+),\s*([^)]+)\)", line)
+                    m = PQCACHE_SET_RE.search(line)
                     if m:
-                        t = line[:18]
                         k, v = m.group(1), m.group(2).strip()
                         if k != "Source":
                             print(f"[{t}] {self.colors.yellow('PQ_CACHE')}: {k:<23} = {self.colors.bold(v)}")
         except KeyboardInterrupt:
             print("\nStopped monitoring.")
+            return 0
         finally:
-            proc.terminate()
+            if proc.poll() is None:
+                proc.terminate()
+        proc.wait()
+        err = proc.stderr.read().strip()
+        raise DeviceError(f"logcat stopped ({proc.returncode}){': ' + err if err else ''}")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="dumbtv picture: inspect and monitor TV picture quality settings.")
-    parser.add_argument("--serial", help="Target device serial (defaults to $ADB_SERIAL)")
-    parser.add_argument("--watch", action="store_true", help="Monitor live setting changes in real time as you adjust them")
-    parser.add_argument("--preset", nargs="?", const="AUTO", help="Inspect factory baseline presets (e.g. HDMI1, HDMI2, DTV)")
-    parser.add_argument("--source", help="Input source (e.g. HDMI1, HDMI2, DTV, App)")
-    parser.add_argument("--mode", default="PC", help="Picture mode for preset inspection (default: PC)")
-    parser.add_argument("--hdr", default="SDR", help="HDR format for preset inspection (default: SDR)")
-    parser.add_argument("--diff", nargs=2, metavar=("SRC1", "SRC2"), help="Diff settings between two inputs (e.g. --diff HDMI1 HDMI2)")
-    parser.add_argument("--json", action="store_true", help="Output results in JSON format")
-    parser.add_argument("--no-color", action="store_true", help="Disable color output")
-    args = parser.parse_args()
+def diff_presets(p1, p2):
+    f1, f2 = flatten(p1), flatten(p2)
+    return {k: (f1.get(k), f2.get(k)) for k in set(f1) | set(f2) if f1.get(k) != f2.get(k)}
 
-    pq = TvPictureQuality(serial=args.serial, color=not args.no_color)
+
+def run(args, pq):
+    pq.check_device()
 
     # 1. Real-time watch mode
     if args.watch:
-        pq.watch()
-        return 0
+        return pq.watch()
+
+    hdr_arg = args.hdr or "SDR"
 
     # 2. Diff mode
     if args.diff:
         arg1, arg2 = args.diff
-        is_mode_diff = arg1.lower() in KNOWN_MODES or arg2.lower() in KNOWN_MODES
+        sources = pq.list_preset_sources()
+        is_src = [any(norm(a) == norm(s) for s in sources) for a in (arg1, arg2)]
 
-        if is_mode_diff:
-            source = args.source or pq.get_active_input().get("source_key", "HDMI1")
-            mode1 = arg1
-            mode2 = arg2
-            p1 = pq.get_preset_settings(source, mode1, args.hdr)
-            p2 = pq.get_preset_settings(source, mode2, args.hdr)
-            title = f"Diff: Mode {mode1} vs {mode2} ({source}, HDR: {args.hdr})"
-            col1, col2 = f"{mode1}", f"{mode2}"
+        if all(is_src):
+            mode = args.mode or "PC"
+            s1, m1, h1, p1 = pq.lookup_preset(arg1, mode, hdr_arg)
+            s2, _, _, p2 = pq.lookup_preset(arg2, mode, hdr_arg)
+            title = f"Diff: {s1} vs {s2} (Mode: {m1}, HDR: {h1})"
+            col1, col2 = s1, s2
+        elif any(is_src):
+            raise PresetLookupError(f"--diff takes two inputs or two picture modes, not one of each: {arg1} {arg2}")
         else:
-            source1 = arg1
-            source2 = arg2
-            mode = args.mode
-            p1 = pq.get_preset_settings(source1, mode, args.hdr)
-            p2 = pq.get_preset_settings(source2, mode, args.hdr)
-            title = f"Diff: {source1} vs {source2} (Mode: {mode}, HDR: {args.hdr})"
-            col1, col2 = f"{source1}", f"{source2}"
+            source = args.source or pq.active_preset_source()
+            s1, m1, h1, p1 = pq.lookup_preset(source, arg1, hdr_arg)
+            _, m2, _, p2 = pq.lookup_preset(source, arg2, hdr_arg)
+            title = f"Diff: Mode {m1} vs {m2} ({s1}, HDR: {h1})"
+            col1, col2 = m1, m2
 
         if args.json:
             print(json.dumps({"diff": {col1: p1, col2: p2}}, indent=2))
         else:
-            diff_dict = {}
-            for k in set(p1.keys()).union(p2.keys()):
-                v1, v2 = p1.get(k), p2.get(k)
-                if isinstance(v1, dict):
-                    v1 = v1.get("Color_Temperature", "Standard")
-                if isinstance(v2, dict):
-                    v2 = v2.get("Color_Temperature", "Standard")
-                if v1 != v2:
-                    diff_dict[k] = (v1, v2)
+            diff_dict = diff_presets(p1, p2)
             print(pq.colors.bold(f"=== {title} ==="))
             if not diff_dict:
                 print(pq.colors.green("No differences found."))
@@ -405,39 +551,81 @@ def main():
     if args.preset:
         source = args.preset
         if source == "AUTO":
-            active_info = pq.get_active_input()
-            source = active_info.get("source_key", "HDMI1")
-        preset_data = pq.get_preset_settings(source, args.mode, args.hdr)
+            source = args.source or pq.active_preset_source()
+        src, mode, hdr, preset_data = pq.lookup_preset(source, args.mode or "PC", hdr_arg)
         if args.json:
-            print(json.dumps({source: {args.mode: {args.hdr: preset_data}}}, indent=2))
+            print(json.dumps({src: {mode: {hdr: preset_data}}}, indent=2))
         else:
-            print(pq.format_table(f"Baseline Preset: {source} (Mode: {args.mode}, HDR: {args.hdr})", preset_data))
+            print(pq.format_table(f"Baseline Preset: {src} (Mode: {mode}, HDR: {hdr})", preset_data))
         return 0
 
     # 4. Default: Live active input inspection
     active_input = pq.get_active_input()
     live = pq.get_live_parameters()
-    source_key = live.get("source") or active_input.get("source_key", "HDMI1")
-    mode_key = live.get("mode") or "Standard"
-    hdr_key = live.get("hdr") or "SDR"
+    mode_key = args.mode or live.get("mode")
+    hdr_key = args.hdr or live.get("hdr") or "SDR"
 
-    preset_data = pq.get_preset_settings(source_key, mode_key, hdr_key)
+    preset_data, preset_error, source_key = None, None, None
+    try:
+        if args.source:
+            source_key = pq.resolve_source(args.source)
+        else:
+            try:
+                source_key = pq.active_preset_source(active_input)
+            except PresetLookupError:
+                if not live.get("source"):
+                    raise
+                source_key = pq.resolve_source(live["source"])
+        if live.get("source") and norm(live["source"]) != norm(source_key) and not args.source:
+            warn(f"the log's last input switch was to {live['source']} but {active_input['port']} is on "
+                 f"screen; the live values may belong to {live['source']}")
+        if not mode_key:
+            raise PresetLookupError("the picture mode is not in the log; pass --mode to compare with a preset")
+        source_key, mode_key, hdr_key, preset_data = pq.lookup_preset(source_key, mode_key, hdr_key)
+    except PresetLookupError as e:
+        preset_error = str(e)
+        if not args.json:
+            warn(f"no preset comparison: {preset_error}")
 
     if args.json:
         result = {
             "active_input": active_input,
             "live_profile": live,
+            "preset_source": source_key,
             "preset_baseline": preset_data,
         }
+        if preset_error:
+            result["preset_error"] = preset_error
         print(json.dumps(result, indent=2))
     else:
         print(pq.colors.bold(f"Active Port: {active_input['port']} (Session ID: {active_input['id'] or 'running'})"))
-        print(pq.colors.bold(f"Active Mode: {mode_key} · Signal: {hdr_key}"))
-        print(pq.colors.dim(f"Preset Source Key: {source_key}"))
+        print(pq.colors.bold(f"Active Mode: {mode_key or 'unknown'} · Signal: {hdr_key}"))
+        print(pq.colors.dim(f"Preset Source Key: {source_key or '-'}  ({pq._preset_dir or 'no presetdb'})"))
         print("")
-        print(pq.format_table(f"Live Picture Settings ({active_input['port']})", live["params"], preset_data if preset_data else None))
+        print(pq.format_table(f"Live Picture Settings ({active_input['port']})", live["params"], preset_data))
 
     return 0
+
+
+def main(argv=None, pq=None):
+    parser = argparse.ArgumentParser(description="dumbtv picture: inspect and monitor TV picture quality settings.")
+    parser.add_argument("--serial", help="Target device serial (defaults to $ADB_SERIAL)")
+    parser.add_argument("--watch", action="store_true", help="Monitor live setting changes in real time as you adjust them")
+    parser.add_argument("--preset", nargs="?", const="AUTO", help="Inspect factory baseline presets (e.g. HDMI1, HDMI2, DTV; default: --source or the active input)")
+    parser.add_argument("--source", help="Input source for --preset, mode --diff and the default view's preset (e.g. HDMI1, DTV, App; default: the active input)")
+    parser.add_argument("--mode", help="Picture mode (default: PC for --preset and input --diff; the live mode for the default view)")
+    parser.add_argument("--hdr", help="HDR format (default: SDR; the live signal for the default view)")
+    parser.add_argument("--diff", nargs=2, metavar=("A", "B"), help="Diff factory presets of two inputs (HDMI1 HDMI2) or two picture modes (PC Standard)")
+    parser.add_argument("--json", action="store_true", help="Output results in JSON format")
+    parser.add_argument("--no-color", action="store_true", help="Disable color output")
+    args = parser.parse_args(argv)
+
+    pq = pq or TvPictureQuality(serial=args.serial, color=not args.no_color)
+    try:
+        return run(args, pq)
+    except (PresetLookupError, DeviceError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
