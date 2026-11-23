@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Broadsheet's icon, redrawn in clean line-art matching Alexa Smart Home. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFC2C2C2"
+        android:strokeWidth="3"
+        android:strokeLineJoin="round"
+        android:pathData="M11,8H37A4,4 0,0 1,41 12V36A4,4 0,0 1,37 40H11A4,4 0,0 1,7 36V12A4,4 0,0 1,11 8Z" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFC2C2C2"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M13,15H35" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFC2C2C2"
+        android:strokeWidth="2.5"
+        android:strokeLineJoin="round"
+        android:pathData="M13,22H22V33H13Z" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFC2C2C2"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round"
+        android:pathData="M27,23H35M27,28H35M27,33H35" />
+</vector>
