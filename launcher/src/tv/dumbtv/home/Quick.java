@@ -15,7 +15,9 @@ import android.content.Intent;
  * Settings chip on the home screen opens the TV's own settings.
  */
 final class Quick {
-    static final String PACKAGE = "tv.dumbtv.quick";
+    static final String PACKAGE_STANDALONE = "io.github.vladislavekimtcov.firetvquick";
+    static final String PACKAGE_LEGACY = "tv.dumbtv.quick";
+    static final String PACKAGE = PACKAGE_STANDALONE;
     static final String ACTION = "tv.dumbtv.quick.PANEL";
     static final int REQUEST_CODE = 42;
     static final String EXTRA_ACCENT = "accent";
@@ -24,6 +26,17 @@ final class Quick {
     static final String EXTRA_IDLE_MINUTES = "idle_minutes";
 
     private Quick() {}
+
+    static String pkg(Context c) {
+        if (c.getPackageManager().resolveActivity(new Intent(ACTION).setPackage(PACKAGE_STANDALONE), 0) != null) {
+            return PACKAGE_STANDALONE;
+        }
+        return PACKAGE_LEGACY;
+    }
+
+    static boolean isQuickPkg(CharSequence pkg) {
+        return PACKAGE_STANDALONE.contentEquals(pkg) || PACKAGE_LEGACY.contentEquals(pkg);
+    }
 
     /**
      * Opens the panel in this activity's task, so BACK returns here and HOME clears it. {@code from}
@@ -45,22 +58,22 @@ final class Quick {
     static final String CONF_IDLE_PAUSE = "idle_pause";
 
     static boolean installed(Context c) {
-        return intent(0, null).resolveActivity(c.getPackageManager()) != null;
+        return intent(c, 0, null).resolveActivity(c.getPackageManager()) != null;
     }
 
-    private static Intent intent(int accent, String from) {
-        return new Intent(ACTION).setPackage(PACKAGE)
+    private static Intent intent(Context c, int accent, String from) {
+        return new Intent(ACTION).setPackage(pkg(c))
                 .putExtra(EXTRA_ACCENT, accent)
                 .putExtra(EXTRA_FROM, from);
     }
 
     static boolean open(Activity a, int accent, String from, String idlePause, int idleMinutes) {
-        Intent i = intent(accent, from);
+        Intent i = intent(a, accent, from);
         if (idlePause != null) i.putExtra(EXTRA_IDLE_PAUSE, idlePause);
         if (idleMinutes > 0) i.putExtra(EXTRA_IDLE_MINUTES, idleMinutes);
         if (i.resolveActivity(a.getPackageManager()) == null) return false;
         try {
-            a.sendBroadcast(new Intent("tv.dumbtv.quick.SHOW").setPackage(PACKAGE).putExtras(i));
+            a.sendBroadcast(new Intent("tv.dumbtv.quick.SHOW").setPackage(pkg(a)).putExtras(i));
             return true;
         } catch (Exception ignored) {}
         try {

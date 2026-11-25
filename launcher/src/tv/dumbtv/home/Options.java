@@ -159,7 +159,7 @@ public final class Options extends Activity {
         // Both decide whether the cog opens the panel or Amazon's quick settings; the panel keeps
         // Amazon's lock to match (quick/AmazonQs.java). Its next press would put it right anyway.
         if (c == Config.QUICK || c == Config.LOCK) {
-            sendBroadcast(new Intent("tv.dumbtv.quick.SYNC").setPackage(Quick.PACKAGE));
+            sendBroadcast(new Intent("tv.dumbtv.quick.SYNC").setPackage(Quick.pkg(this)));
         }
         if (c == Config.LOCK && "on".equals(cfg.get(c))) {
             Toast.makeText(this, getString(R.string.lock_on, (int) (Home.UNLOCK_MS / 1000)),

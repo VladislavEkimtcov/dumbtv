@@ -152,7 +152,7 @@ public final class Guard extends AccessibilityService {
     }
 
     private static void home(Context c, long delayMs) {
-        c.sendBroadcast(new Intent("tv.dumbtv.quick.CLOSE").setPackage("tv.dumbtv.quick"));
+        c.sendBroadcast(new Intent("tv.dumbtv.quick.CLOSE").setPackage(Quick.pkg(c)));
         AlarmManager alarms = (AlarmManager) c.getSystemService(Context.ALARM_SERVICE);
         alarms.setExact(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + delayMs,
                 launch(c));
@@ -238,11 +238,11 @@ public final class Guard extends AccessibilityService {
         if (pkg == null) return;
         if (AMAZON_QS.contentEquals(pkg)) {
             // An overlay over whatever is in front: the panel decides whether it stays.
-            sendBroadcast(new Intent(QUICK_AMAZON_WINDOW).setPackage(Quick.PACKAGE));
+            sendBroadcast(new Intent(QUICK_AMAZON_WINDOW).setPackage(Quick.pkg(this)));
             return;
         }
         if (!AMAZON.contentEquals(pkg)) {
-            if (Quick.PACKAGE.contentEquals(pkg) || "com.android.systemui".contentEquals(pkg) || "android".contentEquals(pkg)) return;
+            if (Quick.isQuickPkg(pkg) || "com.android.systemui".contentEquals(pkg) || "android".contentEquals(pkg)) return;
             boolean own = getPackageName().contentEquals(pkg);
             if (own && !OwnWindow.showsWhatIsInFront(cls, View.class.getName(),
                     Home.class.getName(), Home.inFront)) return;
