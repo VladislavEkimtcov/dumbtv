@@ -34,6 +34,18 @@ final class Quick {
         return PACKAGE_LEGACY;
     }
 
+    /**
+     * A message to the panel's service ({@code SYNC}, {@code SHOW}, {@code CLOSE},
+     * {@code AMAZON_WINDOW}) under the action name the installed panel listens for: the standalone
+     * app prefixes its own package, the legacy one {@code tv.dumbtv.quick}. On the foreground
+     * queue, as the background one waits behind every receiver ahead that has to cold-start.
+     */
+    static Intent message(Context c, String name) {
+        String pkg = pkg(c);
+        String prefix = PACKAGE_STANDALONE.equals(pkg) ? PACKAGE_STANDALONE : PACKAGE_LEGACY;
+        return new Intent(prefix + "." + name).setPackage(pkg).addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
+    }
+
     static boolean isQuickPkg(CharSequence pkg) {
         return PACKAGE_STANDALONE.contentEquals(pkg) || PACKAGE_LEGACY.contentEquals(pkg);
     }
@@ -73,7 +85,7 @@ final class Quick {
         if (idleMinutes > 0) i.putExtra(EXTRA_IDLE_MINUTES, idleMinutes);
         if (i.resolveActivity(a.getPackageManager()) == null) return false;
         try {
-            a.sendBroadcast(new Intent("tv.dumbtv.quick.SHOW").setPackage(pkg(a)).putExtras(i));
+            a.sendBroadcast(message(a, "SHOW").putExtras(i));
             return true;
         } catch (Exception ignored) {}
         try {

@@ -61,7 +61,6 @@ public final class Guard extends AccessibilityService {
     static final String ACTION_SETTINGS_KEY = "tv.dumbtv.home.KEY_SETTINGS";
     /** From dumbtv quick settings: Amazon's overlay outlived the panel and its own toggle. */
     static final String ACTION_AMAZON_BACK = "tv.dumbtv.home.AMAZON_QS_BACK";
-    private static final String QUICK_AMAZON_WINDOW = "tv.dumbtv.quick.AMAZON_WINDOW";
     /** One BACK per overlay: a second one would leave the app or input beneath it. */
     private static final long BACK_DEBOUNCE_MS = 1500;
     private static final long COVER_MAX_MS = 1500;
@@ -152,7 +151,7 @@ public final class Guard extends AccessibilityService {
     }
 
     private static void home(Context c, long delayMs) {
-        c.sendBroadcast(new Intent("tv.dumbtv.quick.CLOSE").setPackage(Quick.pkg(c)));
+        c.sendBroadcast(Quick.message(c, "CLOSE"));
         AlarmManager alarms = (AlarmManager) c.getSystemService(Context.ALARM_SERVICE);
         alarms.setExact(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + delayMs,
                 launch(c));
@@ -238,7 +237,7 @@ public final class Guard extends AccessibilityService {
         if (pkg == null) return;
         if (AMAZON_QS.contentEquals(pkg)) {
             // An overlay over whatever is in front: the panel decides whether it stays.
-            sendBroadcast(new Intent(QUICK_AMAZON_WINDOW).setPackage(Quick.pkg(this)));
+            sendBroadcast(Quick.message(this, "AMAZON_WINDOW"));
             return;
         }
         if (!AMAZON.contentEquals(pkg)) {
