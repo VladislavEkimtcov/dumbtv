@@ -77,6 +77,7 @@ final class Catalog {
     }
 
     /**
+    /**
      * The name of dumbtv home's own vector copy of a package's icon, for built-in apps whose only
      * icon is a small bitmap (48 or 96 px) that blurs at tile size: res/drawable/builtin_*.xml.
      * Looked up by name, so adding one is adding the file.

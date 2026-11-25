@@ -6,7 +6,7 @@ A home screen for Fire TV that does one job: show your apps and your HDMI inputs
   <img src="../docs/assets/screens/home.png" alt="dumbtv home: a clock, an Apps row and an Inputs row" width="720">
 </p>
 
-- **128 KB.** Plain Java and Android views. No AndroidX, Kotlin, Compose, Play
+- **136 KB.** Plain Java and Android views. No AndroidX, Kotlin, Compose, Play
   Services or any other library.
 - **No network.** There is no `INTERNET` permission, so Android will not let it
   open a connection.
@@ -79,14 +79,12 @@ you open an app. On Fire OS 7 and 8 the Settings button opens Amazon's settings 
 | Image dim, wallpaper rotation | for image backgrounds |
 | Child lock | off, on: hides Options and Settings and turns off Hold OK and ☰ Menu on tiles, so the home screen only opens apps and inputs (see below) |
 | App tile style | original (default), Afterglow: uppercase names inside the tile, a brand-color fade into black, a grayscale installed app icon in the corner, and a thin focus border |
-| App tile fill | see-through (default), solid: what an app without a TV banner sits on. See-through is the input tiles' faint fill, so the background shows around the icon; solid is the old dark card. Banners cover the tile either way |
+| Tile fill | solid (default), see-through: what input tiles and apps without a TV banner sit on. See-through is the corner chips' faint fill, so the background shows around the icon, and a focused input fills with the accent like a chip; solid is the dark card. Banners cover the tile either way |
 | Chip style | text (default), icons: Options and Settings become round icon buttons whose knobs and gear hub take the accent color; the name shows next to the icon while it has the focus |
 | Library banner | shown (default), hidden. It only appears once a library folder holds titles (see below) |
 | Icon pack | off, or an installed icon pack; reads "None installed" until one is ([Icon packs](#icon-packs)) |
 
 Icons are loaded at the highest density the app ships, so they stay sharp at tile size.
-Alexa Smart Home, Fire TV's quick settings and Amazon home's profile icon ship only a 48 or 96 px
-bitmap; dumbtv home draws its own vector copy of those three.
 
 Below them: Next wallpaper, which apps and inputs appear on the home screen, a
 reset for order, names, picked icons and hidden tiles, and **Open Amazon's home screen**. Apps
@@ -143,14 +141,13 @@ For a TV that mostly shows one source (a Chromecast, a cable box):
 
 - **Options › Show on startup**: pick whether the TV wakes to the Home screen or
   directly to an input (HDMI 1, Chromecast, Live TV, etc.). Saved as `wake_input`
-  in [the settings file](#the-settings-file).
+  in [the settings file](#the-settings-file). Fire OS 7 and 8 only: the wake is seen by
+  the HOME guard, which Fire OS 6 does not run.
 - `idle_input=<minutes>` in the settings file: after that long on home with no key
   pressed, switch to the startup input. Set `idle_input` below the screensaver delay
   (Settings, 5 minutes by default) and the input's own picture, such as a Chromecast's
   ambient photos, takes the screensaver's place. HOME still returns to the home screen.
-  `idle_pause=off` stops the idle switch, and `idle_pause=<epoch ms>` stops it until then;
-  [dumbtv quick settings](../quick/README.md) sets this from its Auto-switch row where it
-  is installed.
+  `idle_pause=off` stops the idle switch, and `idle_pause=<epoch ms>` stops it until then.
 
 ## Child lock
 
@@ -254,6 +251,12 @@ memory=off
 inputs=on
 # auto tv home
 switch=auto
+# home, or an input's id (Options › Show on startup)
+wake_input=home
+# minutes on the home screen before wake_input opens; 0 = never
+idle_input=0
+# unset, off, or an epoch time in ms until which idle_input waits
+idle_pause=
 # black graphite midnight image adaptive adaptive-tint aurora video
 background=black
 # 0 20 40 60 80, image, aurora and video backgrounds only
@@ -329,6 +332,9 @@ seinfeld.jpg | Seinfeld | com.netflix.ninja | https://www.netflix.com/title/7015
   hbomax.com address), Paramount+ `https://www.paramountplus.com/shows/<name>/` and
   `/movies/video/<id>/`. `adb shell cmd package resolve-activity -a
   android.intent.action.VIEW -d <link> <package>` shows whether an app takes a link.
+- A title can open Amazon's home (`com.amazon.tv.launcher`), with or without a link of
+  its own. As with Options › Open Amazon's home screen, HOME then stays on Amazon's home
+  until you open an app.
 - Wide pictures work best; the banner crops to about 3.8 : 1. Only the picture on
   screen and the one fading in are held in memory.
 
@@ -379,12 +385,12 @@ in `morning-coast.jpg`.
 `background=adaptive-tint` keeps the wallpaper and adds a light wash of that
 colour; without a wallpaper it shows graphite.
 
-| ![Aurora background](../docs/assets/screens/aurora.png) | ![Video background, input tiles in the chips' look](../docs/assets/screens/video.png) |
-|---|---|
-
 `background=aurora` draws slow-drifting light in colours taken from the focused app
 (a green-to-violet night sky for inputs and grey icons). No files; `dim` applies. It
 runs only while the home screen is in front and holds still when animations are off.
+It has a cost on a small TV: on a Fire TV Edition television with 1.4 GB of RAM it drew
+about 30 frames a second using about a third of one core while the home screen showed,
+and nothing once an app was in front.
 
 `background=video` loops `background.mp4` from the settings folder, muted, behind the
 rows. It plays only while the home screen is in front (the decoder is free for whatever

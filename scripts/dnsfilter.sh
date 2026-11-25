@@ -14,6 +14,10 @@ if [[ $DNSFILTER == 0 ]]; then
   note "DNSFILTER=0 in dumbtv.conf — skipping. Re-run ./scripts/configure.sh to change that."
   exit 0
 fi
+# With both off nothing starts the filter at boot: the app ignores dumbtv home's wake too.
+if [[ $FILTER_ALWAYS_ON == 0 && $FILTER_AUTOSTART == 0 ]]; then
+  die "FILTER_ALWAYS_ON=0 and FILTER_AUTOSTART=0 leave nothing to start the filter at boot; set one back to 1 in $CONF"
+fi
 
 PKG=dnsfilter.android
 APK_VERSION=1506103
@@ -312,7 +316,7 @@ configure_in_app() {
 manual_steps() {
   adb_reconnect
   push_to_media "${SAVED_LIST:-dumbtv-blocklist.txt}" || die "push to $MEDIA failed"
-  acmd settings put secure always_on_vpn_app $PKG >/dev/null
+  if [[ ${FILTER_ALWAYS_ON:-1} == 0 ]]; then acmd settings delete secure always_on_vpn_app >/dev/null 2>&1; else acmd settings put secure always_on_vpn_app $PKG >/dev/null; fi
   step "one manual step ($(fireos_name) hides the app's files from adb)"
   if [[ -n $SAVED_LIST ]]; then
     note "the settings are saved in personalDNSfilter and point at the list; it only has to load it:"
@@ -385,7 +389,7 @@ if [[ $DRY_RUN == 0 && $restored == 0 ]]; then
     || die "push of FILTERHOSTS.TXT.DLD_CNT failed"
 fi
 
-acmd settings put secure always_on_vpn_app $PKG >/dev/null
+if [[ ${FILTER_ALWAYS_ON:-1} == 0 ]]; then acmd settings delete secure always_on_vpn_app >/dev/null 2>&1; else acmd settings put secure always_on_vpn_app $PKG >/dev/null; fi
 
 if [[ $SDK -lt 28 && $DRY_RUN == 0 ]]; then
   # Fire OS 6 drops always_on_vpn_app at boot, so the app's own boot receiver (AUTOSTART = true)
@@ -462,7 +466,8 @@ if [[ $fail == 1 ]]; then
   if [[ $(dev1 settings get secure always_on_vpn_app) == "$PKG" ]] &&
      dev 'ip addr show' | grep -Eq '^[0-9]+: tun[0-9]+:.*UP'; then
     note "the tunnel is up and always-on is set, yet DNS goes around it: if a reboot does not"
-    note "fix it, add FILTER_AUTOSTART=0 to dumbtv.conf and run this script again"
+    note "fix it, add FILTER_ALWAYS_ON=0 to dumbtv.conf and run this script again; if that does"
+    note "not help either, FILTER_AUTOSTART=0 instead (not both)"
   fi
   if [[ $restored == 1 ]]; then
     note "the config went in without adb push; if a reboot does not fix it, see \"Fire OS 8\" in docs/TROUBLESHOOTING.md"
